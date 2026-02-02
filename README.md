@@ -1,95 +1,207 @@
 # Stellar Payment DApp
 
-A secure, oracle-backed payment escrow platform on the Stellar network (Soroban). This platform allows Buyers to deposit funds into escrow with volatility protection, which are then released to the Seller upon completion of the transaction, with a combined 2% fee going to the Oracle.
+A secure, oracle-backed payment escrow platform on the Stellar network (Soroban) with **WooCommerce integration** and **ZMOKE token rewards**. This platform allows Buyers to deposit funds into escrow with volatility protection, which are then released to the Seller upon completion of the transaction.
 
-## Quick Start
+## 🚀 Quick Start
 
-Run the setup script to check dependencies and install packages:
+### Development Setup
 ```bash
+# 1. Clone and install
+git clone https://github.com/saariuslystoned/stellar-payment-dapp.git
+cd stellar-payment-dapp
 ./setup_dev_env.sh
+
+# 2. Configure environment
+cp backend/.env.example backend/.env
+# Edit backend/.env with your WooCommerce credentials and ZMOKE keys
+
+# 3. Start all services
+npm run start:frontend     # Frontend on :5173
+cd backend && go run .     # Backend on :8080
+ngrok http 8080            # Tunnel for webhooks
 ```
 
-## Prerequisites
+---
 
-- **Stellar CLI**: Install with:
-  ```bash
-  curl -s https://raw.githubusercontent.com/stellar/bin/main/install.sh | bash
-  ```
-  ([Official Guide](https://developers.stellar.org/docs/build/smart-contracts/getting-started/setup#install-the-stellar-cli))
-- **Rust/Cargo**: Install with:
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-- **Node.js**: v18+ recommended.
-- **Python 3.11+**: For utility scripts.
+## 📋 Prerequisites
 
-### Python Environment (Optional, for tools/)
+- **Stellar CLI**: `curl -s https://raw.githubusercontent.com/stellar/bin/main/install.sh | bash`
+- **Go 1.21+**: For the backend server
+- **Node.js v18+**: For the frontend
+- **ngrok**: For exposing local backend to webhooks
+
+### Optional
+- **Rust/Cargo**: For contract development
+- **Python 3.11+**: For utility scripts
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   WooCommerce   │────▶│   Go Backend    │────▶│  Stellar Chain  │
+│   (WordPress)   │     │   (Port 8080)   │     │   (Soroban)     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                       │                       │
+        │                       │                       │
+        ▼                       ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Payment Plugin │     │  ngrok Tunnel   │     │  ZMOKE Tokens   │
+│  (PHP Gateway)  │     │  (Public URL)   │     │  (Rewards)      │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+---
+
+## 🖥️ Running the Backend
+
+The Go backend handles WooCommerce webhooks, escrow management, and ZMOKE token distribution.
+
+### 1. Configure Environment
 ```bash
-python3 -m venv venv
-./venv/bin/python3 -m pip install stellar-sdk
+cd backend
+cp .env.example .env
 ```
 
-### Frontend Dependencies
+Edit `backend/.env`:
+```env
+# WooCommerce API Credentials
+WC_BASE_URL=https://your-store.com
+WC_CONSUMER_KEY=ck_your_key
+WC_CONSUMER_SECRET=cs_your_secret
+
+# ZMOKE Token Distribution
+ZMOKE_DISTRIBUTOR_SECRET=S...
+ZMOKE_DISTRIBUTOR_PUBLIC_KEY=G...
+ZMOKE_ISSUER_SECRET=S...
+ZMOKE_ISSUER_PUBLIC_KEY=G...
+```
+
+### 2. Run the Backend
 ```bash
-cd frontend && npm install
+cd backend
+set -a && source .env && set +a
+go run .
 ```
 
-## 1. Setup Identities & Funding
+The backend will start on `http://localhost:8080`.
 
-Generate and fund the four required roles on the Testnet:
+---
 
+## 🌐 ngrok Setup (Required for Webhooks)
+
+WooCommerce needs a public URL to send webhooks. Use ngrok to tunnel your local backend:
+
+### 1. Install ngrok
 ```bash
-# Identities
-stellar keys generate deployer --network testnet
-stellar keys generate buyer --network testnet
-stellar keys generate seller --network testnet
-stellar keys generate oracle --network testnet
+# macOS
+brew install ngrok
 
-# Faucet Funding (XLM)
-stellar keys fund buyer --network testnet
-stellar keys fund seller --network testnet
-stellar keys fund deployer --network testnet
-stellar keys fund oracle --network testnet
+# Linux
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+sudo apt update && sudo apt install ngrok
+
+# Or download from https://ngrok.com/download
 ```
 
-### 1.1 Funding with USDC (Swap XLM → USDC)
-
-The Buyer needs USDC for the transaction. Sellers and Oracles also need a USDC trustline.
-
-> 💡 **AI Workflow**: Use `/fund-buyer` to automate this step.
-
+### 2. Start the Tunnel
 ```bash
-# Add Trustlines
-# Run for buyer, seller, AND oracle:
-stellar tx new change-trust \
-  --source <IDENTITY_NAME> \
-  --line USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 \
-  --network testnet \
-  --build-only \
-  | stellar tx sign --sign-with-key <IDENTITY_NAME> --network testnet \
-  | stellar tx send --network testnet
-
-# Swap XLM for USDC (Buyer only)
-# Note: Amounts are in STROOPS (1 unit = 10^7 stroops)
-# 150 USDC = 1,500,000,000 stroops | 2000 XLM max = 20,000,000,000 stroops
-stellar tx new path-payment-strict-receive \
-  --source buyer \
-  --send-asset native \
-  --send-max 20000000000 \
-  --dest-asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 \
-  --dest-amount 1500000000 \
-  --destination buyer \
-  --network testnet \
-  --build-only \
-  | stellar tx sign --sign-with-key buyer --network testnet \
-  | stellar tx send --network testnet
+ngrok http 8080
 ```
 
-## 2. Deploy & Initialize Contract
+Copy the `https://xxx.ngrok-free.dev` URL - you'll need it for WooCommerce.
 
-> 💡 **AI Workflow**: Use `/deploy-testnet` to automate build, deploy, and initialization.
+### 3. Configure WooCommerce Webhook
+In WordPress Admin → WooCommerce → Settings → Advanced → Webhooks:
+- **Name**: Stellar Payment Webhook
+- **Status**: Active
+- **Topic**: Order created
+- **Delivery URL**: `https://your-ngrok-url.ngrok-free.dev/webhook`
+- **Secret**: (leave empty or match backend)
 
-### 2.1 Build & Deploy
+---
+
+## 🛒 WooCommerce Integration
+
+### 1. Install the Payment Gateway Plugin
+
+Copy the plugin to your WordPress installation:
+```bash
+# Upload via FTP/SFTP or copy directly
+cp smoky-stellar-gateway.php wp-content/plugins/
+```
+
+Or upload `smoky-stellar-gateway.php` via WordPress Admin → Plugins → Add New → Upload Plugin.
+
+### 2. Activate and Configure
+
+1. Go to **Plugins** → Activate "Smoky Stellar Gateway"
+2. Go to **WooCommerce** → **Settings** → **Payments**
+3. Enable "Stellar (USDC / XLM)" and click **Manage**
+4. Configure:
+   - **Frontend URL**: Your Cloudflare Pages URL (e.g., `https://your-app.pages.dev`)
+   - **Enable/Disable**: Checked
+
+### 3. How It Works
+1. Customer selects "Stellar" at checkout
+2. Redirected to your React frontend with `orderId` and `amount`
+3. Connects wallet (Albedo) and deposits to escrow
+4. Backend receives webhook, updates order to "Processing"
+5. ZMOKE rewards distributed ($1 = 10 ZMOKE)
+
+See [docs/woocommerce_setup.md](docs/woocommerce_setup.md) for detailed setup guide.
+
+---
+
+## 💻 Running the Frontend
+
+### Local Development
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Access at [http://localhost:5173](http://localhost:5173).
+
+### Build for Production
+```bash
+cd frontend
+VITE_BACKEND_URL=https://your-ngrok-url.ngrok-free.dev npm run build
+```
+
+### Deploy to Cloudflare Pages
+```bash
+cd frontend
+npx wrangler pages deploy dist --project-name=your-project-name
+```
+
+See [docs/DEPLOY_FRONTEND.md](docs/DEPLOY_FRONTEND.md) for Cloudflare deployment details.
+
+---
+
+## 🪙 ZMOKE Token Rewards
+
+Buyers automatically receive ZMOKE tokens as rewards:
+- **Rate**: $1 spent = 10 ZMOKE
+- **Auto-replenishment**: Backend mints 100k ZMOKE when distributor balance < 50k
+- **Requirements**: Buyer must have ZMOKE trustline (frontend provides "Claim ZMOKE" button)
+
+### Setup ZMOKE Tokens
+```bash
+# Use the setup script
+./tools/setup_zmoke.sh
+
+# Or manually (see docs/tokenomics.md)
+```
+
+---
+
+## 📜 Smart Contract Operations
+
+### Deploy Contract
 ```bash
 stellar contract build
 stellar contract deploy \
@@ -99,12 +211,7 @@ stellar contract deploy \
   --alias payment_escrow
 ```
 
-### 2.2 Initialize
-Initialize the contract with Admin, Fee Recipient, and the Reflector Oracle address.
-
-**Note**: For Testnet, you can use the official Reflector contract address or a mock.
-Example Reflector (Testnet): `CAVLP5DH2GJPZMVO7IJY4CVOD5MWEFTJFVPD2YY2FQXOQHRGHK4D6HLP`
-
+### Initialize Contract
 ```bash
 stellar contract invoke \
   --id payment_escrow \
@@ -117,30 +224,7 @@ stellar contract invoke \
   --reflector CAVLP5DH2GJPZMVO7IJY4CVOD5MWEFTJFVPD2YY2FQXOQHRGHK4D6HLP
 ```
 
-## 3. Execute Workflow
-
-### 3.1 Deposit (Buyer)
-The Buyer locks funds into the escrow. The contract automatically checks the Reflector Oracle for the price.
-
-```bash
-stellar contract invoke \
-  --id payment_escrow \
-  --source buyer \
-  --network testnet \
-  -- \
-  deposit \
-  --buyer $(stellar keys address buyer) \
-  --seller $(stellar keys address seller) \
-  --token <USDC_TOKEN_ID> \
-  --amount <DEPOSIT_AMOUNT_IN_STROOPS> \
-  --target_usd_value <TARGET_USD_IN_7_DECIMALS>
-```
-*Note: Amount and Target Value are in 7 decimals (e.g. 10000000 = 1 unit).*
-
-### 3.2 Release (Admin/Deployer)
-Once the transaction terms are met, the Admin releases the funds:
-
-> 💡 **AI Workflow**: Use `/release-escrow` to automate this step.
+### Release Escrow
 ```bash
 stellar contract invoke \
   --id payment_escrow \
@@ -151,32 +235,20 @@ stellar contract invoke \
   --escrow_id 1
 ```
 
-## Economics
+---
+
+## 💰 Economics
+
 - **Buyer Pays**: `Price + 1%`
 - **Seller Receives**: `Price - 1%`
-- **Oracle Receives**: Combined **2% fee**.
+- **Oracle Receives**: Combined **2% fee**
+- **Buyer Bonus**: ZMOKE rewards (10 per $1 spent)
 
-## 4. Running the DApp (Local Development)
+---
 
-The project includes a React frontend for easy interaction.
+## 🤖 AI Agent Workflows
 
-1.  **Start the Development Server**:
-    This will start the Vite frontend (usually port 5173).
-    ```bash
-    npm run dev
-    ```
-
-2.  **Access the DApp**:
-    Open [http://localhost:5173](http://localhost:5173) in your browser.
-
-3.  **Usage**:
-    *   **Login**: Connect with Albedo or use a Secret Key.
-    *   **Deposit**: Fill in the form to create an escrow.
-    *   **Verify**: Check balances on the Testnet explorer.
-
-## 5. AI Agent Workflows
-
-If using an AI coding assistant with workflow support, the following slash commands are available in `.agent/workflows/`:
+If using an AI coding assistant with workflow support:
 
 | Command | Description |
 |---------|-------------|
@@ -185,3 +257,52 @@ If using an AI coding assistant with workflow support, the following slash comma
 | `/fund-buyer` | Swap XLM→USDC for buyer account |
 | `/setup-tokens` | Initialize SMOKY/ZMOKE tokens |
 | `/test-contracts` | Run contract test suite |
+
+---
+
+## 📁 Project Structure
+
+```
+stellar-payment-dapp/
+├── backend/              # Go backend server
+│   ├── main.go          # Main server (webhooks, escrow, ZMOKE)
+│   ├── woocommerce.go   # WC API client
+│   └── .env             # Environment config
+├── frontend/             # React frontend
+│   ├── src/components/  # UI components
+│   └── src/services/    # Soroban/Stellar services
+├── contracts/            # Soroban smart contracts
+│   └── payment_escrow/  # Main escrow contract
+├── docs/                 # Documentation
+│   ├── woocommerce_setup.md
+│   ├── DEPLOY_FRONTEND.md
+│   ├── tokenomics.md
+│   └── ROADMAP.md
+├── tools/                # Setup scripts
+└── smoky-stellar-gateway.php  # WooCommerce plugin
+```
+
+---
+
+## 📚 Documentation
+
+- [WooCommerce Setup](docs/woocommerce_setup.md) - Payment gateway configuration
+- [Frontend Deployment](docs/DEPLOY_FRONTEND.md) - Cloudflare Pages setup
+- [Tokenomics](docs/tokenomics.md) - SMOKY/ZMOKE token design
+- [Roadmap](docs/ROADMAP.md) - Development path
+
+---
+
+## 🔒 Security Notes (Testnet vs Mainnet)
+
+**Current setup is for Testnet only.** For mainnet:
+- Move `ZMOKE_ISSUER_SECRET` to a separate secure service
+- Implement HSM or multi-sig for token minting
+- Use environment-specific configurations
+- See [ROADMAP.md](docs/ROADMAP.md) Phase 3 for security checklist
+
+---
+
+## License
+
+MIT
