@@ -38,6 +38,11 @@ The v1 release establishes the core functional loop on the Stellar Testnet.
 *   **Security Audit**: Third-party review of the `payment_escrow` contract.
 *   **Mainnet Deployment**: Configuration for Stellar Mainnet.
 *   **Automated CI/CD**: GitHub Actions for building and testing on every PR.
+*   **ZMOKE Issuer Key Isolation**:
+    *   [ ] Move ZMOKE_ISSUER_SECRET out of main backend to a separate secure service.
+    *   [ ] Implement alert-only mode: backend logs/alerts when distributor balance < 50k.
+    *   [ ] Manual or HSM-protected replenishment for mainnet (100k ZMOKE per batch).
+    *   *Why*: Issuer key controls infinite minting; must be isolated from user-facing services.
 
 ## Development Workflow
 1.  **Clone** the repository.

@@ -9,7 +9,7 @@ import {
 import albedo from '@albedo-link/intent';
 
 // Contract ID on Testnet
-const CONTRACT_ID = 'CAWI7CU3VLC6MQC4XIJIQNKS5HBRGXXQYH5VY7VKGL57WAGEKO7VWBRT';
+const CONTRACT_ID = 'CDLLYK6JTLNNDEW3RGH2FNKKFLQLPSV64CGDFZK3WDH5M6QIFIMWAHIB';
 
 // Reflector Contract for UI estimates (Testnet)
 // Reflector Contract for UI estimates (Testnet)
@@ -57,7 +57,7 @@ export const soroban = {
 
         const op = contract.call('deposit',
             nativeToScVal(buyerAddress, { type: 'address' }),
-            nativeToScVal('GBYQDAOSZFGUGJSFVO7J2CXAJJOB6N3DRZO7QS47BKLZOAREZIZSRG3U', { type: 'address' }), // Admin
+            nativeToScVal('GA65VXDFMPMX6WYWIV47D4T4D2UTBZ7UFTYX6SQPPUMB4LW6UITCEH22', { type: 'address' }), // Seller
             nativeToScVal(tokenAddress, { type: 'address' }),
             nativeToScVal(BigInt(tokenAmountStroops), { type: 'i128' }), // Amount
             nativeToScVal(BigInt(targetVal), { type: 'i128' })  // Target Value
@@ -84,7 +84,7 @@ export const soroban = {
         // 5. Submit
         const result = await server.sendTransaction(TransactionBuilder.fromXDR(res.signed_envelope_xdr, "Test SDF Network ; September 2015"));
 
-        if (result.status !== 'PENDING' && result.status !== 'SUCCESS') {
+        if (result.status !== 'PENDING') {
             console.error("Tx Result", result);
             throw new Error(`Transaction failed: ${result.status}`);
         }
@@ -131,5 +131,37 @@ export const soroban = {
         // In a real verification tool, this would need the Admin to sign.
         // For the frontend, we just prepare it.
         return tx.toXDR();
+    },
+
+    /**
+     * Create a trustline for ZMOKE token so buyer can receive rewards
+     */
+    async createZmokeTrustline(buyerAddress: string): Promise<string> {
+        const { Asset, Operation, Horizon, TransactionBuilder: ClassicBuilder } = await import('@stellar/stellar-sdk');
+
+        const horizonServer = new Horizon.Server('https://horizon-testnet.stellar.org');
+        const account = await horizonServer.loadAccount(buyerAddress);
+
+        // ZMOKE Issuer from keys.md
+        const ZMOKE_ISSUER = 'GC3V72IIUGZWHXI3AV3P7TAHYX7SLSX7HHXD7ERD33NQV3OFGED4GW7L';
+        const zmokeAsset = new Asset('ZMOKE', ZMOKE_ISSUER);
+
+        const tx = new ClassicBuilder(account, { fee: '100' })
+            .addOperation(Operation.changeTrust({
+                asset: zmokeAsset,
+                limit: '10000000000' // High limit for rewards
+            }))
+            .setTimeout(30)
+            .setNetworkPassphrase("Test SDF Network ; September 2015")
+            .build();
+
+        // Sign with Albedo
+        const res = await albedo.tx({
+            xdr: tx.toXDR(),
+            network: 'testnet',
+            submit: true // Submit directly
+        });
+
+        return res.tx_hash;
     }
 };

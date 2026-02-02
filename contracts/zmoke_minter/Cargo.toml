@@ -1,0 +1,21 @@
+[package]
+name = "zmoke_minter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "23.1.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "23.1.0", features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+# NOTE: OpenZeppelin Stellar contracts integration pending
+# - v0.4.1 requires soroban-sdk v22 (incompatible with our v23 for ZK layer)
+# - v0.6.0 has breaking API changes, MCP generates outdated code
+# TODO: Revisit when OZ MCP is updated for v0.6.0 compatibility

@@ -2,15 +2,37 @@
 
 A secure, oracle-backed payment escrow platform on the Stellar network (Soroban). This platform allows Buyers to deposit funds into escrow with volatility protection, which are then released to the Seller upon completion of the transaction, with a combined 2% fee going to the Oracle.
 
+## Quick Start
+
+Run the setup script to check dependencies and install packages:
+```bash
+./setup_dev_env.sh
+```
+
 ## Prerequisites
 
-- [Stellar CLI](https://developers.stellar.org/docs/build/smart-contracts/getting-started/setup#install-the-stellar-cli) installed.
-- Python 3.11+ installed.
-- `stellar-sdk` installed in a virtual environment:
+- **Stellar CLI**: Install with:
   ```bash
-  python3 -m venv venv
-  ./venv/bin/python3 -m pip install stellar-sdk
+  curl -s https://raw.githubusercontent.com/stellar/bin/main/install.sh | bash
   ```
+  ([Official Guide](https://developers.stellar.org/docs/build/smart-contracts/getting-started/setup#install-the-stellar-cli))
+- **Rust/Cargo**: Install with:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Node.js**: v18+ recommended.
+- **Python 3.11+**: For utility scripts.
+
+### Python Environment (Optional, for tools/)
+```bash
+python3 -m venv venv
+./venv/bin/python3 -m pip install stellar-sdk
+```
+
+### Frontend Dependencies
+```bash
+cd frontend && npm install
+```
 
 ## 1. Setup Identities & Funding
 
@@ -34,6 +56,8 @@ stellar keys fund oracle --network testnet
 
 The Buyer needs USDC for the transaction. Sellers and Oracles also need a USDC trustline.
 
+> 💡 **AI Workflow**: Use `/fund-buyer` to automate this step.
+
 ```bash
 # Add Trustlines
 # Run for buyer, seller, AND oracle:
@@ -46,12 +70,14 @@ stellar tx new change-trust \
   | stellar tx send --network testnet
 
 # Swap XLM for USDC (Buyer only)
+# Note: Amounts are in STROOPS (1 unit = 10^7 stroops)
+# 150 USDC = 1,500,000,000 stroops | 2000 XLM max = 20,000,000,000 stroops
 stellar tx new path-payment-strict-receive \
   --source buyer \
   --send-asset native \
-  --send-max 2000 \
+  --send-max 20000000000 \
   --dest-asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 \
-  --dest-amount 150 \
+  --dest-amount 1500000000 \
   --destination buyer \
   --network testnet \
   --build-only \
@@ -60,6 +86,8 @@ stellar tx new path-payment-strict-receive \
 ```
 
 ## 2. Deploy & Initialize Contract
+
+> 💡 **AI Workflow**: Use `/deploy-testnet` to automate build, deploy, and initialization.
 
 ### 2.1 Build & Deploy
 ```bash
@@ -111,6 +139,8 @@ stellar contract invoke \
 
 ### 3.2 Release (Admin/Deployer)
 Once the transaction terms are met, the Admin releases the funds:
+
+> 💡 **AI Workflow**: Use `/release-escrow` to automate this step.
 ```bash
 stellar contract invoke \
   --id payment_escrow \
@@ -144,3 +174,14 @@ The project includes a React frontend for easy interaction.
     *   **Deposit**: Fill in the form to create an escrow.
     *   **Verify**: Check balances on the Testnet explorer.
 
+## 5. AI Agent Workflows
+
+If using an AI coding assistant with workflow support, the following slash commands are available in `.agent/workflows/`:
+
+| Command | Description |
+|---------|-------------|
+| `/deploy-testnet` | Build, deploy & initialize payment_escrow contract |
+| `/release-escrow` | Release escrowed funds to seller |
+| `/fund-buyer` | Swap XLM→USDC for buyer account |
+| `/setup-tokens` | Initialize SMOKY/ZMOKE tokens |
+| `/test-contracts` | Run contract test suite |

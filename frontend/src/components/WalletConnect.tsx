@@ -2,10 +2,12 @@ import { useState } from 'react';
 import albedo from '@albedo-link/intent';
 
 interface WalletConnectProps {
+    publicKey: string | null;
     onConnect: (publicKey: string) => void;
+    onDisconnect?: () => void;
 }
 
-export const WalletConnect = ({ onConnect }: WalletConnectProps) => {
+export const WalletConnect = ({ publicKey, onConnect, onDisconnect }: WalletConnectProps) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -25,6 +27,34 @@ export const WalletConnect = ({ onConnect }: WalletConnectProps) => {
         }
     };
 
+    const truncateAddress = (address: string) => {
+        return `${address.slice(0, 4)}...${address.slice(-4)}`;
+    };
+
+    // If wallet is connected, show connected state
+    if (publicKey) {
+        return (
+            <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-4 py-2 bg-emerald-900/30 border border-emerald-700/50 rounded-lg">
+                    <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
+                    <span className="text-emerald-400 font-mono text-sm">
+                        {truncateAddress(publicKey)}
+                    </span>
+                </div>
+                {onDisconnect && (
+                    <button
+                        onClick={onDisconnect}
+                        className="px-3 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-all text-sm"
+                        title="Disconnect wallet"
+                    >
+                        Disconnect
+                    </button>
+                )}
+            </div>
+        );
+    }
+
+    // If not connected, show connect prompt
     return (
         <div className="flex flex-col items-center gap-4 p-6 bg-slate-900 rounded-xl border border-slate-700 shadow-2xl">
             <h2 className="text-xl font-bold text-white">Connect Your Wallet</h2>
