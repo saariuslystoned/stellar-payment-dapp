@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"bytes"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,7 @@ import (
 const (
 	Port            = ":8080"
 	PaymentEscrowID = "CDLLYK6JTLNNDEW3RGH2FNKKFLQLPSV64CGDFZK3WDH5M6QIFIMWAHIB" // payment_escrow contract
-	ZmokeMinterID   = "" // TODO: Deploy and set ZMOKE minter contract ID
+	ZmokeMinterID   = ""                                                         // TODO: Deploy and set ZMOKE minter contract ID
 )
 
 // PendingOrder tracks orders awaiting escrow deposit
@@ -45,9 +46,9 @@ var (
 
 // WooCommerce webhook payload
 type OrderPayload struct {
-	ID     int    `json:"id"`
-	Status string `json:"status"`
-	Total  string `json:"total"`
+	ID      int    `json:"id"`
+	Status  string `json:"status"`
+	Total   string `json:"total"`
 	Billing struct {
 		Email string `json:"email"`
 	} `json:"billing"`
@@ -80,6 +81,9 @@ func main() {
 	// Legacy endpoint for compatibility
 	http.HandleFunc("/webhook/order-completed", handleOrderCompleted)
 
+	// Price endpoint for live XLM/USD rates
+	http.HandleFunc("/price/xlm", corsMiddleware(handlePriceXLM))
+
 	// Start Horizon watcher in background
 	go watchHorizonEvents()
 
@@ -93,7 +97,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, ngrok-skip-browser-warning")
 
 		// Handle preflight
 		if r.Method == http.MethodOptions {
@@ -129,7 +133,7 @@ func handlePendingOrder(w http.ResponseWriter, r *http.Request) {
 	var order OrderPayload
 	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
 		log.Printf("❌ JSON Decode Error: %v", err)
-		http.Error(w, "Bad request: " + err.Error(), http.StatusBadRequest)
+		http.Error(w, "Bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -190,7 +194,7 @@ func handleEscrowLink(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📋 Order #%d not in pending orders, will fetch total from WooCommerce", req.OrderID)
 	}
 	mu.Unlock()
-	
+
 	// Fallback: If order total is 0, try to get it from WooCommerce
 	if orderTotal == 0 {
 		if wcOrder, err := wcClient.GetOrder(req.OrderID); err == nil && wcOrder != nil {
@@ -234,7 +238,7 @@ func handleEscrowLink(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("✅ Escrow released: %s", releaseTxHash)
-		
+
 		// Add release note to order
 		releaseURL := fmt.Sprintf("https://stellar.expert/explorer/testnet/tx/%s", releaseTxHash)
 		releaseNote := fmt.Sprintf(`🔓 Escrow released to seller. <a href="%s" target="_blank">View Release TX</a>`, releaseURL)
@@ -245,7 +249,7 @@ func handleEscrowLink(w http.ResponseWriter, r *http.Request) {
 		if req.BuyerAddress != "" && orderTotal > 0 {
 			zmokeAmount := int64(orderTotal * 10)
 			log.Printf("🪙 Distributing %d ZMOKE to %s...", zmokeAmount, req.BuyerAddress)
-			
+
 			if zmokeTxHash, err := distributeZmoke(req.BuyerAddress, zmokeAmount); err != nil {
 				log.Printf("⚠️ Failed to distribute ZMOKE: %v", err)
 				wcClient.AddOrderNote(req.OrderID, fmt.Sprintf("⚠️ ZMOKE distribution failed: %v", err))
@@ -289,7 +293,7 @@ func watchHorizonEvents() {
 		}
 
 		log.Printf("🔍 Checking %d pending orders for deposits...", pendingCount)
-		
+
 		// For each pending order with escrow ID, check if funded
 		mu.Lock()
 		for orderID, po := range pendingOrders {
@@ -321,7 +325,7 @@ func isEscrowFunded(escrowID string) bool {
 		"get_escrow",
 		"--escrow_id", escrowID,
 	)
-	
+
 	output, err := cmd.Output()
 	if err != nil {
 		return false
@@ -360,6 +364,23 @@ func processRelease(orderID int, po *PendingOrder) {
 	}
 }
 
+// Helper to extract tx hash from CLI output
+func extractTxHash(output string) string {
+	re := regexp.MustCompile(`[0-9a-f]{64}`)
+	matches := re.FindAllString(output, -1)
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	// Fallback
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "Transaction") || strings.Contains(line, "hash") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return "unknown"
+}
+
 // releaseEscrow calls the contract to release funds
 func releaseEscrow(escrowID string) (string, error) {
 	cmd := exec.Command("stellar", "contract", "invoke",
@@ -377,14 +398,7 @@ func releaseEscrow(escrowID string) (string, error) {
 	}
 
 	// Extract tx hash from output
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "Transaction") || strings.Contains(line, "hash") {
-			return strings.TrimSpace(line), nil
-		}
-	}
-
-	return "unknown", nil
+	return extractTxHash(string(output)), nil
 }
 
 // checkAndReplenishZmoke checks distributor balance and mints 100k if below 50k
@@ -392,12 +406,12 @@ func checkAndReplenishZmoke() {
 	distributorPubKey := os.Getenv("ZMOKE_DISTRIBUTOR_PUBLIC_KEY")
 	issuerSecret := os.Getenv("ZMOKE_ISSUER_SECRET")
 	issuerPublicKey := os.Getenv("ZMOKE_ISSUER_PUBLIC_KEY")
-	
+
 	if distributorPubKey == "" || issuerSecret == "" || issuerPublicKey == "" {
 		log.Printf("⚠️ ZMOKE replenishment: missing env vars (ZMOKE_DISTRIBUTOR_PUBLIC_KEY, ZMOKE_ISSUER_SECRET, ZMOKE_ISSUER_PUBLIC_KEY)")
 		return
 	}
-	
+
 	// Check distributor balance via Horizon
 	resp, err := http.Get(fmt.Sprintf("https://horizon-testnet.stellar.org/accounts/%s", distributorPubKey))
 	if err != nil {
@@ -405,7 +419,7 @@ func checkAndReplenishZmoke() {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	var account struct {
 		Balances []struct {
 			AssetCode string `json:"asset_code"`
@@ -416,7 +430,7 @@ func checkAndReplenishZmoke() {
 		log.Printf("⚠️ Failed to parse distributor account: %v", err)
 		return
 	}
-	
+
 	var zmokeBalance float64
 	for _, b := range account.Balances {
 		if b.AssetCode == "ZMOKE" {
@@ -424,16 +438,16 @@ func checkAndReplenishZmoke() {
 			break
 		}
 	}
-	
+
 	log.Printf("📊 Distributor ZMOKE balance: %.2f", zmokeBalance)
-	
+
 	// Threshold: 50,000 ZMOKE
 	if zmokeBalance < 50000 {
 		log.Printf("⚠️ Distributor low on ZMOKE (%.2f < 50000), replenishing 100,000...", zmokeBalance)
-		
+
 		// Mint 100k ZMOKE (100,000 * 10^7 stroops)
 		replenishAmount := int64(100000) * 10000000
-		
+
 		cmdBuild := exec.Command("stellar", "tx", "new", "payment",
 			"--source", issuerPublicKey,
 			"--destination", distributorPubKey,
@@ -442,7 +456,7 @@ func checkAndReplenishZmoke() {
 			"--network", "testnet",
 			"--build-only",
 		)
-		
+
 		var stderrBuild bytes.Buffer
 		cmdBuild.Stderr = &stderrBuild
 		xdrBuild, err := cmdBuild.Output()
@@ -450,13 +464,13 @@ func checkAndReplenishZmoke() {
 			log.Printf("❌ Replenish build failed: %s", stderrBuild.String())
 			return
 		}
-		
+
 		cmdSign := exec.Command("stellar", "tx", "sign",
 			"--sign-with-key", issuerSecret,
 			"--network", "testnet",
 		)
 		cmdSign.Stdin = bytes.NewReader(xdrBuild)
-		
+
 		var stderrSign bytes.Buffer
 		cmdSign.Stderr = &stderrSign
 		xdrSigned, err := cmdSign.Output()
@@ -464,18 +478,18 @@ func checkAndReplenishZmoke() {
 			log.Printf("❌ Replenish sign failed: %s", stderrSign.String())
 			return
 		}
-		
+
 		cmdSend := exec.Command("stellar", "tx", "send",
 			"--network", "testnet",
 		)
 		cmdSend.Stdin = bytes.NewReader(xdrSigned)
-		
+
 		output, err := cmdSend.CombinedOutput()
 		if err != nil {
 			log.Printf("❌ Replenish send failed: %s", string(output))
 			return
 		}
-		
+
 		log.Printf("✅ Replenished 100,000 ZMOKE to distributor: %s", strings.TrimSpace(string(output)))
 	}
 }
@@ -485,7 +499,7 @@ func checkAndReplenishZmoke() {
 func distributeZmoke(destination string, amount int64) (string, error) {
 	// Check and replenish if needed (runs async to not block)
 	go checkAndReplenishZmoke()
-	
+
 	distributorSecret := os.Getenv("ZMOKE_DISTRIBUTOR_SECRET")
 	issuerPublicKey := os.Getenv("ZMOKE_ISSUER_PUBLIC_KEY")
 
@@ -500,7 +514,7 @@ func distributeZmoke(destination string, amount int64) (string, error) {
 
 	// Convert amount to stroops (1 ZMOKE = 10^7 stroops)
 	amountInStroops := amount * 10000000
-	
+
 	log.Printf("Coin Distributing %d ZMOKE (%d stroops) to %s from %s", amount, amountInStroops, destination, kp.Address())
 
 	// 1. Build Transaction (Payment)
@@ -512,7 +526,7 @@ func distributeZmoke(destination string, amount int64) (string, error) {
 		"--network", "testnet",
 		"--build-only",
 	)
-	
+
 	var stderrBuild bytes.Buffer
 	cmdBuild.Stderr = &stderrBuild
 	xdrBuild, err := cmdBuild.Output()
@@ -526,7 +540,7 @@ func distributeZmoke(destination string, amount int64) (string, error) {
 		"--network", "testnet",
 	)
 	cmdSign.Stdin = bytes.NewReader(xdrBuild)
-	
+
 	var stderrSign bytes.Buffer
 	cmdSign.Stderr = &stderrSign
 	xdrSigned, err := cmdSign.Output()
@@ -539,16 +553,16 @@ func distributeZmoke(destination string, amount int64) (string, error) {
 		"--network", "testnet",
 	)
 	cmdSend.Stdin = bytes.NewReader(xdrSigned)
-	
+
 	output, err := cmdSend.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("send tx failed: %s", string(output))
 	}
 
-	// Parse tx hash from output (format varies, try to extract)
-	txHash := strings.TrimSpace(string(output))
+	// Parse tx hash from output
+	txHash := extractTxHash(string(output))
 	log.Printf("ZMOKE tx output: %s", txHash)
-	
+
 	return txHash, nil
 }
 
@@ -567,4 +581,154 @@ func handleOrderCompleted(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("📦 Legacy: Order #%d: %s for %s", order.ID, order.Status, order.Total)
 	w.WriteHeader(http.StatusOK)
+}
+
+// ============================================================
+// PRICE ORACLE: Reflector XLM/USD Price Feed
+// ============================================================
+
+// PriceCache holds cached price data
+type PriceCache struct {
+	XlmPerUsd float64   `json:"xlm_per_usd"`
+	PriceUsd  float64   `json:"price_usd"`
+	Timestamp int64     `json:"timestamp"`
+	CachedAt  time.Time `json:"-"`
+}
+
+var (
+	priceCache   *PriceCache
+	priceCacheMu sync.RWMutex
+)
+
+const (
+	PriceCacheDuration = 300 * time.Second // 5 minutes - matches Reflector oracle update frequency
+	// CEX/DEX Exchange Rates Oracle - Most accurate for crypto (has XLM, BTC, ETH, etc.)
+	ReflectorCEXDEXID = "CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63"
+	// Foreign Exchange Rates Oracle (has XLM too, but derived from FX)
+	ReflectorFXID = "CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W"
+	// USDC Oracle (Stellar Pubnet - AQUA, yUSDC, SSLX, EURC)
+	ReflectorUSDCID = "CAVLP5DH2GJPZMVO7IJY4CVOD5MWEFTJFVPD2YY2FQXOQHRGHK4D6HLP"
+)
+
+// handlePriceXLM returns live XLM/USD price from Reflector Oracle
+func handlePriceXLM(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check cache first
+	priceCacheMu.RLock()
+	if priceCache != nil && time.Since(priceCache.CachedAt) < PriceCacheDuration {
+		cached := *priceCache
+		priceCacheMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+	priceCacheMu.RUnlock()
+
+	// Fetch fresh price from Reflector
+	price, err := fetchReflectorPrice()
+	if err != nil {
+		log.Printf("❌ Failed to fetch Reflector price: %v", err)
+		http.Error(w, "Failed to fetch price: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Update cache
+	priceCacheMu.Lock()
+	priceCache = price
+	priceCacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(price)
+}
+
+// fetchReflectorPrice fetches XLM/USD price from Reflector CEX/DEX Oracle
+func fetchReflectorPrice() (*PriceCache, error) {
+	// Use Stellar CLI to query Reflector CEX/DEX Oracle for XLM price
+	// Asset format: {"Other":"XLM"} for major cryptos
+	cmd := exec.Command("stellar", "contract", "invoke",
+		"--id", ReflectorCEXDEXID,
+		"--network", "testnet",
+		"--source", "deployer",
+		"--send=no",
+		"--",
+		"lastprice",
+		"--asset", `{"Other":"XLM"}`,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("reflector call failed: %v (output: %s)", err, string(output))
+	}
+
+	outputStr := strings.TrimSpace(string(output))
+	log.Printf("📊 Reflector FX raw output: %s", outputStr)
+
+	// Parse JSON response: {"price":"...","timestamp":...}
+	var priceData struct {
+		Price     string `json:"price"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	if err := json.Unmarshal([]byte(outputStr), &priceData); err != nil {
+		// Check for null response
+		if outputStr == "null" {
+			return nil, fmt.Errorf("XLM price not available from oracle")
+		}
+		return nil, fmt.Errorf("failed to parse price data: %v (raw: %s)", err, outputStr)
+	}
+
+	// Parse price (14 decimals as per Reflector spec)
+	priceInt, err := strconv.ParseInt(priceData.Price, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid price value: %s", priceData.Price)
+	}
+
+	// Reflector FX uses 14 decimals, base is USD
+	// Price represents: how much USD per 1 XLM
+	priceUsd := float64(priceInt) / 100000000000000.0 // 10^14
+	xlmPerUsd := 1.0 / priceUsd
+
+	log.Printf("📊 Live XLM price from Reflector: $%.4f (1 USD = %.2f XLM)", priceUsd, xlmPerUsd)
+
+	return &PriceCache{
+		XlmPerUsd: xlmPerUsd,
+		PriceUsd:  priceUsd,
+		Timestamp: priceData.Timestamp,
+		CachedAt:  time.Now(),
+	}, nil
+}
+
+// parseReflectorOutput parses Soroban CLI output format
+func parseReflectorOutput(output string) (int64, int64, error) {
+	// Handle various output formats from Stellar CLI
+	// Format 1: {"price":"2347000","timestamp":"1738505000"}
+	// Format 2: PriceData { price: 2347000, timestamp: 1738505000 }
+	// Format 3: Some(PriceData { ... })
+
+	// Try to extract price and timestamp using regex
+	priceRegex := regexp.MustCompile(`price["\s:]+(\d+)`)
+	tsRegex := regexp.MustCompile(`timestamp["\s:]+(\d+)`)
+
+	priceMatch := priceRegex.FindStringSubmatch(output)
+	tsMatch := tsRegex.FindStringSubmatch(output)
+
+	if len(priceMatch) < 2 {
+		return 0, 0, fmt.Errorf("could not find price in output")
+	}
+
+	price, err := strconv.ParseInt(priceMatch[1], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var timestamp int64 = time.Now().Unix()
+	if len(tsMatch) >= 2 {
+		timestamp, _ = strconv.ParseInt(tsMatch[1], 10, 64)
+	}
+
+	return price, timestamp, nil
 }

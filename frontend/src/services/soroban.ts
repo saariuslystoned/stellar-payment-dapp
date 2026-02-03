@@ -11,9 +11,8 @@ import albedo from '@albedo-link/intent';
 // Contract ID on Testnet
 const CONTRACT_ID = 'CDLLYK6JTLNNDEW3RGH2FNKKFLQLPSV64CGDFZK3WDH5M6QIFIMWAHIB';
 
-// Reflector Contract for UI estimates (Testnet)
-// Reflector Contract for UI estimates (Testnet)
-// const REFLECTOR_ID = 'CAVLP5DH2GJPZMVO7IJY4CVOD5MWEFTJFVPD2YY2FQXOQHRGHK4D6HLP';
+// Backend URL for price API
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
 
 // Native XLM Contract on Testnet (Wrapped)
 export const NATIVE_TOKEN_ID = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -22,18 +21,52 @@ export const TOKEN_ID = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAM
 
 const server = new rpc.Server('https://soroban-testnet.stellar.org:443');
 
-export const soroban = {
-    async getReflectorPrice(_tokenAddress: string): Promise<number> {
-        // Suppress unused var warning
-        void _tokenAddress;
-        // UI Helper to estimate price.
-        // In a real app, we would simulate a call to Reflector 'last_price' here.
-        // For this demo, since we are using Mock Reflector logic (or assuming Testnet liquidity),
-        // we'll return a static estimate to the UI, while the CONTRACT enforces the check.
+// Price response type from backend
+export interface PriceData {
+    xlm_per_usd: number;
+    price_usd: number;
+    timestamp: number;
+}
 
-        // Note: The Reflector contract 'CAVLP...' is real on Testnet.
-        // We could try to reading it.
-        return 5.0; // Mock Rate: 1 USD = 5 XLM
+export const soroban = {
+    /**
+     * Fetch live XLM/USD price from Reflector Oracle via backend
+     * THROWS if price unavailable - no fallback for production safety
+     */
+    async getXlmPrice(): Promise<PriceData> {
+        const res = await fetch(`${BACKEND_URL}/price/xlm`, {
+            headers: {
+                // Required to bypass ngrok's interstitial page on free tier
+                // Backend CORS is configured to allow this header
+                'ngrok-skip-browser-warning': 'true'
+            }
+        });
+        if (!res.ok) {
+            const errorText = await res.text().catch(() => 'Unknown error');
+            throw new Error(`Oracle unavailable: ${res.status} - ${errorText}`);
+        }
+
+        // Check if we got HTML (ngrok interstitial) instead of JSON
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+            throw new Error('Backend returned non-JSON response (ngrok interstitial?)');
+        }
+
+        const data = await res.json();
+        // Validate the price data
+        if (!data.xlm_per_usd || data.xlm_per_usd <= 0 || !data.price_usd || data.price_usd <= 0) {
+            throw new Error('Invalid price data from oracle');
+        }
+        return data;
+    },
+
+    /**
+     * @deprecated Use getXlmPrice() instead
+     */
+    async getReflectorPrice(_tokenAddress: string): Promise<number> {
+        void _tokenAddress;
+        const priceData = await this.getXlmPrice();
+        return priceData.xlm_per_usd;
     },
 
     async deposit(

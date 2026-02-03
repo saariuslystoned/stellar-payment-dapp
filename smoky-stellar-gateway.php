@@ -138,3 +138,173 @@ function add_smoky_stellar_gateway( $methods ) {
     return $methods;
 }
 add_filter( 'woocommerce_payment_gateways', 'add_smoky_stellar_gateway' );
+
+/**
+ * ============================================================
+ * ADMIN PANEL: Stellar Payments Dashboard
+ * ============================================================
+ */
+
+/**
+ * Register admin menu under WooCommerce
+ */
+add_action( 'admin_menu', 'smoky_stellar_admin_menu' );
+
+function smoky_stellar_admin_menu() {
+    add_submenu_page(
+        'woocommerce',
+        'Stellar Payments',
+        'Stellar Payments',
+        'manage_woocommerce',
+        'stellar-payments',
+        'smoky_stellar_admin_page'
+    );
+}
+
+/**
+ * Admin page renderer
+ */
+function smoky_stellar_admin_page() {
+    // Query all orders using Stellar payment method
+    $args = array(
+        'payment_method' => 'smoky_stellar',
+        'limit'          => 100,
+        'orderby'        => 'date',
+        'order'          => 'DESC',
+    );
+    
+    $orders = wc_get_orders( $args );
+    
+    ?>
+    <div class="wrap">
+        <h1>🚀 Stellar Payments Dashboard</h1>
+        <p>All transactions processed through the Smoky Stellar Payment Gateway.</p>
+        
+        <?php if ( empty( $orders ) ) : ?>
+            <div class="notice notice-info">
+                <p>No Stellar payments found yet.</p>
+            </div>
+        <?php else : ?>
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th style="width:70px;">Order #</th>
+                        <th style="width:120px;">Date</th>
+                        <th style="width:90px;">Status</th>
+                        <th style="width:80px;">Amount</th>
+                        <th style="width:180px;">Buyer Wallet</th>
+                        <th style="width:100px;">Payment TX</th>
+                        <th style="width:100px;">Escrow</th>
+                        <th style="width:90px;">ZMOKE</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ( $orders as $order ) : 
+                        $order_id    = $order->get_id();
+                        $date        = $order->get_date_created()->date( 'M j, Y g:ia' );
+                        $status      = $order->get_status();
+                        $total       = $order->get_formatted_order_total();
+                        $buyer_addr  = $order->get_meta( '_stellar_buyer_address' );
+                        $tx_hash     = $order->get_meta( '_stellar_tx_hash' );
+                        $escrow_id   = $order->get_meta( '_stellar_escrow_id' );
+                        
+                        // Parse ZMOKE and escrow status from order notes
+                        $notes_data  = smoky_parse_order_notes( $order_id );
+                        $zmoke_amt   = $notes_data['zmoke_amount'];
+                        $escrow_stat = $notes_data['escrow_released'] ? '✅ Released' : ( $escrow_id ? '⏳ Pending' : '—' );
+                        
+                        // Shorten wallet for display
+                        $wallet_short = $buyer_addr ? substr( $buyer_addr, 0, 8 ) . '...' . substr( $buyer_addr, -4 ) : '—';
+                        
+                        // Status badge colors
+                        $status_colors = array(
+                            'processing' => '#2271b1',
+                            'completed'  => '#00a32a',
+                            'pending'    => '#dba617',
+                            'failed'     => '#d63638',
+                            'cancelled'  => '#787c82',
+                        );
+                        $status_color = isset( $status_colors[ $status ] ) ? $status_colors[ $status ] : '#787c82';
+                    ?>
+                    <tr>
+                        <td>
+                            <a href="<?php echo admin_url( 'post.php?post=' . $order_id . '&action=edit' ); ?>">
+                                <strong>#<?php echo $order_id; ?></strong>
+                            </a>
+                        </td>
+                        <td><?php echo esc_html( $date ); ?></td>
+                        <td>
+                            <span style="background:<?php echo $status_color; ?>; color:#fff; padding:2px 8px; border-radius:3px; font-size:11px;">
+                                <?php echo esc_html( ucfirst( $status ) ); ?>
+                            </span>
+                        </td>
+                        <td><?php echo $total; ?></td>
+                        <td title="<?php echo esc_attr( $buyer_addr ); ?>">
+                            <?php if ( $buyer_addr ) : ?>
+                                <code style="font-size:11px;"><?php echo esc_html( $wallet_short ); ?></code>
+                            <?php else : ?>
+                                —
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ( $tx_hash ) : ?>
+                                <a href="https://stellar.expert/explorer/testnet/tx/<?php echo esc_attr( $tx_hash ); ?>" target="_blank" style="font-size:11px;">
+                                    View TX ↗
+                                </a>
+                            <?php else : ?>
+                                —
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php echo esc_html( $escrow_stat ); ?>
+                        </td>
+                        <td>
+                            <?php if ( $zmoke_amt > 0 ) : ?>
+                                <span style="color:#00a32a; font-weight:bold;">🪙 <?php echo $zmoke_amt; ?></span>
+                            <?php else : ?>
+                                —
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            
+            <p style="margin-top:15px; color:#666;">
+                Showing <?php echo count( $orders ); ?> orders. 
+                <a href="https://stellar.expert/explorer/testnet" target="_blank">Open Stellar Explorer ↗</a>
+            </p>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+/**
+ * Parse order notes for ZMOKE amount and escrow status
+ */
+function smoky_parse_order_notes( $order_id ) {
+    $result = array(
+        'zmoke_amount'    => 0,
+        'escrow_released' => false,
+        'zmoke_tx'        => '',
+        'release_tx'      => '',
+    );
+    
+    $notes = wc_get_order_notes( array( 'order_id' => $order_id ) );
+    
+    foreach ( $notes as $note ) {
+        $content = $note->content;
+        
+        // Check for ZMOKE distribution
+        if ( preg_match( '/Rewarded buyer with (\d+) ZMOKE/', $content, $matches ) ) {
+            $result['zmoke_amount'] = intval( $matches[1] );
+        }
+        
+        // Check for escrow release
+        if ( strpos( $content, 'Escrow released' ) !== false ) {
+            $result['escrow_released'] = true;
+        }
+    }
+    
+    return $result;
+}

@@ -20,6 +20,13 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
     const [zmokeBalance, setZmokeBalance] = useState<string | null>(null);
     const [hasZmokeTrustline, setHasZmokeTrustline] = useState<boolean>(false);
     const [claimStatus, setClaimStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+    const [paidTokenAmount, setPaidTokenAmount] = useState<string>('');
+    const [paidTokenSymbol, setPaidTokenSymbol] = useState<string>('');
+
+    // Live XLM price from Reflector Oracle
+    const [xlmPrice, setXlmPrice] = useState<{ xlmPerUsd: number; priceUsd: number } | null>(null);
+    const [priceLoading, setPriceLoading] = useState(true);
+    const [priceError, setPriceError] = useState<string | null>(null);
 
     // Fetch ZMOKE balance and trustline status when wallet connects
     useEffect(() => {
@@ -48,6 +55,31 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
         }
     }, [buyerAddress, claimStatus, status]); // Re-fetch after claim or status change
 
+    // Fetch live XLM price on mount and periodically
+    useEffect(() => {
+        const fetchPrice = async () => {
+            setPriceLoading(true);
+            setPriceError(null);
+            try {
+                const priceData = await soroban.getXlmPrice();
+                setXlmPrice({
+                    xlmPerUsd: priceData.xlm_per_usd,
+                    priceUsd: priceData.price_usd
+                });
+            } catch (e: any) {
+                console.error('Failed to fetch XLM price:', e);
+                setPriceError(e.message || 'Oracle unavailable');
+                setXlmPrice(null);
+            }
+            setPriceLoading(false);
+        };
+
+        fetchPrice();
+        // Refresh price every 60 seconds
+        const interval = setInterval(fetchPrice, 300000); // 5 minutes - matches Reflector oracle update frequency
+        return () => clearInterval(interval);
+    }, []);
+
     // Claim ZMOKE rewards by creating trustline
     const handleClaimZmoke = async () => {
         try {
@@ -64,18 +96,28 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
 
     const isUsdc = selectedToken === TOKEN_ID;
     const tokenSymbol = isUsdc ? 'USDC' : 'XLM';
-    // Mock Price for UI feedback (must match Oracle logic)
-    const pricePerUnit = isUsdc ? 1.0 : 5.0;
+    // Use live price for XLM, 1.0 for USDC - NO FALLBACK for XLM!
+    const pricePerUnit = isUsdc ? 1.0 : xlmPrice?.xlmPerUsd;
+    // Block XLM deposits if price unavailable
+    const xlmPriceUnavailable: boolean = !isUsdc && (!xlmPrice || !!priceError);
 
     const handleDeposit = async () => {
+        // Block if XLM price not available
+        if (xlmPriceUnavailable) {
+            setStatus('error');
+            setMessage('Cannot deposit XLM: Oracle price unavailable. Try USDC or wait for price.');
+            return;
+        }
+        if (!pricePerUnit) {
+            setStatus('error');
+            setMessage('Price data unavailable. Please refresh the page.');
+            return;
+        }
+
         try {
             setStatus('loading');
 
             // Calculate 1% buyer fee
-            // User enters "USD Value" (e.g. 1)
-            // If USDC: 1 USD = 1 USDC. Total = 1.01 USDC.
-            // If XLM:  1 USD = 5 XLM.  Total = 5.05 XLM.
-
             const usdValue = Number(amount);
             const tokenAmount = usdValue * pricePerUnit;
             const fee = tokenAmount / 100;
@@ -102,6 +144,8 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
             setStatus('success');
             setMessage('Deposit Successful!');
             setTxHash(result.tx_hash);
+            setPaidTokenAmount(totalTokenAmount);
+            setPaidTokenSymbol(tokenSymbol);
             if (result.escrow_id) {
                 const eId = result.escrow_id.toString();
                 setEscrowId(eId);
@@ -151,51 +195,89 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
     // Success state - show transaction complete view
     if (status === 'success') {
         return (
-            <div className="w-full max-w-md p-6 bg-slate-800/50 rounded-xl border border-slate-700 backdrop-blur-sm">
-                <div className="text-center space-y-6">
+            <div className="w-full max-w-md p-5 bg-slate-800/50 rounded-xl border border-slate-700 backdrop-blur-sm">
+                <div className="text-center space-y-4">
                     {/* Success Icon */}
-                    <div className="relative mx-auto w-20 h-20">
+                    <div className="relative mx-auto w-16 h-16">
                         <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping"></div>
-                        <div className="relative w-20 h-20 bg-gradient-to-br from-emerald-500 to-green-600 rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30">
-                            <span className="text-4xl">✓</span>
+                        <div className="relative w-16 h-16 bg-gradient-to-br from-emerald-500 to-green-600 rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                            <span className="text-3xl">✓</span>
                         </div>
                     </div>
 
                     {/* Success Message */}
                     <div>
-                        <h3 className="text-2xl font-bold text-white mb-2">Transaction Complete!</h3>
-                        <p className="text-slate-400">Your deposit has been successfully processed.</p>
+                        <h3 className="text-xl font-bold text-white mb-1">Transaction Complete!</h3>
+                        <p className="text-slate-400 text-sm">Your deposit has been successfully processed.</p>
                     </div>
 
                     {/* Transaction Details Card */}
-                    <div className="p-4 bg-slate-900/70 rounded-lg border border-emerald-900/50 text-left space-y-3">
+                    <div className="p-3 bg-slate-900/70 rounded-lg border border-emerald-900/50 text-left space-y-2">
                         <div className="flex justify-between items-center">
-                            <span className="text-slate-400 text-sm">Amount Deposited</span>
-                            <span className="text-emerald-400 font-bold font-mono">${amount} USD</span>
+                            <span className="text-slate-400 text-xs">Checkout Price</span>
+                            <span className="text-emerald-400 font-bold font-mono text-sm">${amount} USD</span>
                         </div>
+                        {paidTokenSymbol === 'XLM' && (
+                            <div className="flex justify-between items-center">
+                                <span className="text-slate-400 text-xs">Amount Sent</span>
+                                <span className="text-cyan-400 font-bold font-mono text-sm">{parseFloat(paidTokenAmount).toFixed(2)} XLM</span>
+                            </div>
+                        )}
                         {escrowId && (
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400 text-sm">Escrow ID</span>
-                                <span className="text-blue-400 font-bold font-mono">#{escrowId}</span>
+                                <span className="text-slate-400 text-xs">Escrow ID</span>
+                                <span className="text-blue-400 font-bold font-mono text-sm">#{escrowId}</span>
                             </div>
                         )}
                         {txHash && (
-                            <div className="pt-2 border-t border-slate-800">
-                                <span className="text-slate-500 text-xs block mb-1">Transaction Hash</span>
-                                <span className="text-slate-300 text-xs font-mono break-all">{txHash}</span>
+                            <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
+                                <span className="text-slate-500 text-xs">Transaction Hash</span>
+                                <a
+                                    href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-slate-300 text-xs font-mono hover:text-white transition-colors underline decoration-slate-600"
+                                >
+                                    {txHash.substring(0, 8)}...{txHash.substring(txHash.length - 8)}
+                                </a>
                             </div>
                         )}
                     </div>
 
                     {/* ZMOKE Rewards Section - After TX Hash */}
                     {txHash && (
-                        <div className="mt-4 p-3 bg-purple-900/30 rounded-lg border border-purple-700/50">
+                        <div className="mt-2 p-2.5 bg-purple-900/30 rounded-lg border border-purple-700/50">
                             <div className="flex items-center justify-between mb-2">
-                                <span className="text-purple-300 font-semibold text-sm">🪙 ZMOKE Rewards</span>
-                                {hasZmokeTrustline && zmokeBalance && (
-                                    <span className="text-purple-400 font-mono text-sm">{parseFloat(zmokeBalance).toFixed(2)}</span>
-                                )}
+                                <span className="text-purple-300 font-semibold text-xs">🪙 ZMOKE Rewards</span>
                             </div>
+
+                            {/* Only show detailed breakdown when we have trustline and balance */}
+                            {hasZmokeTrustline && zmokeBalance !== null && (
+                                <div className="space-y-1 text-xs">
+                                    {/* Current Balance */}
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-slate-400">Current Balance</span>
+                                        <span className="text-purple-400 font-mono">{parseFloat(zmokeBalance).toFixed(2)} ZMOKE</span>
+                                    </div>
+
+                                    {/* Earned from this purchase */}
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-slate-400">Earned (${Number(amount).toFixed(2)} × 10)</span>
+                                        <span className="text-emerald-400 font-mono">+{(Number(amount) * 10).toFixed(2)} ZMOKE</span>
+                                    </div>
+
+                                    {/* Divider */}
+                                    <div className="border-t border-purple-700/50 my-1"></div>
+
+                                    {/* New Total */}
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-purple-200 font-medium">After Distribution</span>
+                                        <span className="text-purple-300 font-mono font-bold">{(parseFloat(zmokeBalance) + Number(amount) * 10).toFixed(2)} ZMOKE</span>
+                                    </div>
+
+                                    <p className="text-slate-500 text-[10px] mt-1">⏳ ZMOKE distributed after escrow clears</p>
+                                </div>
+                            )}
 
                             {!hasZmokeTrustline && claimStatus !== 'success' && (
                                 <div className="space-y-2">
@@ -203,7 +285,7 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
                                     <button
                                         onClick={handleClaimZmoke}
                                         disabled={claimStatus === 'loading'}
-                                        className={`w-full py-2 text-sm font-bold rounded-lg transition-all ${claimStatus === 'loading'
+                                        className={`w-full py-1.5 text-xs font-bold rounded-lg transition-all ${claimStatus === 'loading'
                                             ? 'bg-purple-800 text-purple-400 cursor-wait'
                                             : claimStatus === 'error'
                                                 ? 'bg-red-600 hover:bg-red-500 text-white'
@@ -226,7 +308,7 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
                     {!orderId && (
                         <button
                             onClick={resetForm}
-                            className="w-full py-3 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-lg transition-all shadow-lg hover:shadow-emerald-500/20"
+                            className="w-full py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-lg transition-all shadow-lg hover:shadow-emerald-500/20 text-sm"
                         >
                             Make Another Transaction
                         </button>
@@ -283,20 +365,48 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
 
                 <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-800 space-y-2">
                     <div className="flex justify-between text-sm">
-                        <span className="text-slate-400">Exchange Rate</span>
-                        <span className="text-white font-mono">1 USD = {pricePerUnit.toFixed(2)} {tokenSymbol}</span>
+                        <span className="text-slate-400 flex items-center gap-2">
+                            Exchange Rate
+                            {!isUsdc && (
+                                priceLoading ? (
+                                    <span className="text-xs text-yellow-500 animate-pulse">⏳</span>
+                                ) : priceError ? (
+                                    <span className="text-xs text-red-500" title={priceError}>⚠️ ERROR</span>
+                                ) : (
+                                    <span className="text-xs text-emerald-500" title="Live price from Reflector Oracle">🔴 LIVE</span>
+                                )
+                            )}
+                        </span>
+                        <span className="text-white font-mono">
+                            {xlmPriceUnavailable ? (
+                                <span className="text-red-400">Price unavailable</span>
+                            ) : (
+                                <>
+                                    1 USD = {(pricePerUnit ?? 0).toFixed(2)} {tokenSymbol}
+                                    {!isUsdc && xlmPrice && (
+                                        <span className="text-slate-500 text-xs ml-1">(${xlmPrice.priceUsd.toFixed(4)})</span>
+                                    )}
+                                </>
+                            )}
+                        </span>
                     </div>
                     <div className="flex justify-between text-sm">
                         <span className="text-slate-400">Token Amount</span>
-                        <span className="text-white font-mono">{(Number(amount) * pricePerUnit).toFixed(2)} {tokenSymbol}</span>
+                        <span className="text-white font-mono">
+                            {xlmPriceUnavailable ? '--' : (Number(amount) * (pricePerUnit ?? 0)).toFixed(2)} {tokenSymbol}
+                        </span>
                     </div>
                     <div className="flex justify-between text-sm">
                         <span className="text-slate-400">Buyer Fee (1%)</span>
-                        <span className="text-white font-mono">{((Number(amount) * pricePerUnit) / 100).toFixed(2)} {tokenSymbol}</span>
+                        <span className="text-white font-mono">
+                            {xlmPriceUnavailable ? '--' : ((Number(amount) * (pricePerUnit ?? 0)) / 100).toFixed(2)} {tokenSymbol}
+                        </span>
                     </div>
                     <div className="border-t border-slate-800 pt-2 flex justify-between text-sm font-bold">
                         <span className="text-white">Total to Pay</span>
-                        <span className="text-blue-400 font-mono">{((Number(amount) * pricePerUnit) * 1.01).toFixed(2)} {tokenSymbol}</span>
+                        <span className="text-blue-400 font-mono">
+                            {xlmPriceUnavailable ? '--' : ((Number(amount) * (pricePerUnit ?? 0)) * 1.01).toFixed(2)} {tokenSymbol}
+                        </span>
                     </div>
                 </div>
 
@@ -308,10 +418,10 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
 
                 <button
                     onClick={handleDeposit}
-                    disabled={status === 'loading'}
+                    disabled={status === 'loading' || xlmPriceUnavailable}
                     className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-lg transition-all shadow-lg hover:shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                    {status === 'loading' ? message : `Deposit ${tokenSymbol}`}
+                    {status === 'loading' ? message : xlmPriceUnavailable ? 'Oracle Unavailable - Use USDC' : `Deposit ${tokenSymbol}`}
                 </button>
             </div>
         </div>

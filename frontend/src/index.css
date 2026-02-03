@@ -24,3 +24,6 @@ body {
   min-width: 320px;
   min-height: 100vh;
 }
+/* rebuild-v2 */
+/* Build timestamp: 1770147203 */
+:root { --build-v: 2; }

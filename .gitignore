@@ -53,3 +53,4 @@ backup/
 *.log
 venv/
 .python_packages/
+backend/server
