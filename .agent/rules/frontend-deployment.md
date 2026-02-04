@@ -1,3 +1,7 @@
+---
+trigger: always_on
+---
+
 # Frontend Deployment Reminder
 
 When making changes to the frontend (`frontend/src/`), remember:
@@ -9,3 +13,13 @@ When making changes to the frontend (`frontend/src/`), remember:
    - The WooCommerce iframe on `smokyproduct.co` loads from Cloudflare, NOT from the local backend.
 
 3. **Always deploy to Cloudflare** after frontend changes if you want them live on WooCommerce.
+
+## Backend Restart
+
+**Always use `fuser -k 8080/tcp`** to free the port when restarting the backend:
+
+```bash
+cd backend && go build -o main . && fuser -k 8080/tcp 2>/dev/null; set -a && source .env && set +a && ./main &
+```
+
+Do NOT use `pkill` - it's slower and less reliable than `fuser`.
