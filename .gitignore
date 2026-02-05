@@ -54,3 +54,4 @@ backup/
 venv/
 .python_packages/
 backend/server
+backend/main

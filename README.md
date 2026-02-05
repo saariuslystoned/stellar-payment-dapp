@@ -1,6 +1,15 @@
 # Stellar Payment DApp
 
-A secure, oracle-backed payment escrow platform on the Stellar network (Soroban) with **WooCommerce integration** and **ZMOKE token rewards**. This platform allows Buyers to deposit funds into escrow with volatility protection, which are then released to the Seller upon completion of the transaction.
+A secure, oracle-backed payment escrow platform on the Stellar network (Soroban) with **WooCommerce integration**, **Blend Protocol yield generation**, and **ZMOKE token rewards**. Buyers deposit funds that automatically earn yield in Blend Protocol while awaiting order fulfillment.
+
+## ✨ Key Features
+
+- **🏦 Blend Protocol Integration**: Deposited funds (USDC & XLM) automatically supply to Blend for yield
+- **🛒 WooCommerce Ready**: Payment gateway plugin with customer enrollment and wallet management
+- **🪙 ZMOKE Rewards**: Buyers earn ZMOKE tokens ($1 spent = 10 ZMOKE)
+- **👤 Stellar Customer Accounts**: Custom user role with G-address attached to profile
+- **💼 Store Credit System**: Burn ZMOKE for store credit at checkout
+- **💱 Multi-Asset**: Supports both USDC and XLM payments
 
 ## 🚀 Quick Start
 
@@ -44,13 +53,26 @@ ngrok http 8080            # Tunnel for webhooks
 │   (WordPress)   │     │   (Port 8080)   │     │   (Soroban)     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
         │                       │                       │
-        │                       │                       │
-        ▼                       ▼                       ▼
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Payment Plugin │     │  ngrok Tunnel   │     │  ZMOKE Tokens   │
-│  (PHP Gateway)  │     │  (Public URL)   │     │  (Rewards)      │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                       │                       ▼
+        ▼                       ▼               ┌─────────────────┐
+┌─────────────────┐     ┌─────────────────┐     │  Pool Contract  │
+│  Payment Plugin │     │  ngrok Tunnel   │     │ (deposits/yield)│
+│  (PHP Gateway)  │     │  (Public URL)   │     └────────┬────────┘
+└─────────────────┘     └─────────────────┘              │
+                                                         ▼
+                                                ┌─────────────────┐
+                                                │ Blend Protocol  │
+                                                │ (Earn Yield)    │
+                                                └─────────────────┘
 ```
+
+### Flow
+1. Customer selects Stellar payment at WooCommerce checkout
+2. Redirected to React frontend with order details
+3. Connects wallet (Albedo) and deposits USDC/XLM to Pool Contract
+4. **Pool Contract automatically supplies funds to Blend for yield**
+5. Backend confirms payment, updates WooCommerce order status
+6. Buyer receives ZMOKE rewards
 
 ---
 
@@ -142,11 +164,31 @@ Or upload `smoky-stellar-gateway.php` via WordPress Admin → Plugins → Add Ne
 3. Enable "Stellar (USDC / XLM)" and click **Manage**
 4. Configure:
    - **Frontend URL**: Your Cloudflare Pages URL (e.g., `https://your-app.pages.dev`)
+   - **Backend URL**: Your ngrok/backend URL for enrollment
    - **Enable/Disable**: Checked
 
-### 3. How It Works
+### 3. Plugin Features
+
+**Customer Enrollment Flow:**
+1. Customer sees "Enroll in ZMOKE Rewards" checkbox at checkout
+2. If checked, $0.25 activation fee added to order
+3. On order completion, backend creates Stellar wallet
+4. Secret key modal displays (one-time display with copy button)
+5. User assigned `stellar_customer` role with G-address in profile
+
+**Admin Features:**
+- **Users List**: "Stellar Wallet" column shows abbreviated G-address
+- **User Profile**: Full G-address displayed in "Stellar Wallet Information" section
+- **WooCommerce → Stellar Payments**: Dashboard showing all Stellar transactions
+
+**My Account Integration:**
+- G-address displayed with full public key
+- Live ZMOKE balance fetched from Stellar Horizon API
+- Store credit balance display
+
+### 4. Payment Flow
 1. Customer selects "Stellar" at checkout
-2. Redirected to your React frontend with `orderId` and `amount`
+2. Redirected to React frontend with `orderId` and `amount`
 3. Connects wallet (Albedo) and deposits to escrow
 4. Backend receives webhook, updates order to "Processing"
 5. ZMOKE rewards distributed ($1 = 10 ZMOKE)
@@ -272,7 +314,9 @@ stellar-payment-dapp/
 │   ├── src/components/  # UI components
 │   └── src/services/    # Soroban/Stellar services
 ├── contracts/            # Soroban smart contracts
-│   └── payment_escrow/  # Main escrow contract
+│   ├── pool_contract/   # Main pool contract (Blend-integrated)
+│   ├── payment_escrow/  # Legacy escrow contract
+│   └── zmoke_minter/    # ZMOKE token minter
 ├── docs/                 # Documentation
 │   ├── woocommerce_setup.md
 │   ├── DEPLOY_FRONTEND.md

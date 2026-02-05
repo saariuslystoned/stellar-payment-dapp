@@ -1,45 +1,12 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Vec, token, Symbol,
-    contracterror, log
+    contract, contractimpl, contracttype, Address, Env, Map, Vec, token,
+    contracterror, log, IntoVal
 };
 
-// ============================================================
-// BLEND POOL INTERFACE
-// ============================================================
-// Based on docs.blend.capital/tech-docs/integrations/integrate-pool
-// Fund Management uses Request structs with submit()
+// Use official Blend SDK for pool integration
+use blend_contract_sdk::pool;
 
-/// Request types for Blend Pool operations
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum RequestType {
-    Deposit = 0,
-    Withdraw = 1,
-    SupplyCollateral = 2,
-    WithdrawCollateral = 3,
-    Borrow = 4,
-    Repay = 5,
-}
-
-/// Request struct for Blend Pool operations
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Request {
-    pub request_type: u32,
-    pub address: Address,  // Asset address
-    pub amount: i128,
-}
-
-// Blend Pool client interface
-// In production, use blend-contract-sdk for full Blend integration
-// For now, we'll manually build the submit() calls
-// 
-// When Blend WASM is available, uncomment:
-// mod blend_pool {
-//     soroban_sdk::contractimport!(file = "../blend_pool.wasm");
-// }
 
 // ============================================================
 // POOL CONTRACT TYPES
@@ -57,6 +24,17 @@ pub enum PoolError {
     BlendOperationFailed = 6,
 }
 
+/// Deposit record for MSM verification
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Deposit {
+    pub buyer: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub order_id: u64,
+    pub timestamp: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -71,6 +49,7 @@ pub enum DataKey {
     SuppliedToBlend,    // bool - whether funds are currently in Blend
     FeesEarnedUsdc,     // i128 - accumulated USDC fees
     FeesEarnedXlm,      // i128 - accumulated XLM fees
+    Deposits,           // Map<u64, Deposit> - Tracking for MSM
 }
 
 // ============================================================
@@ -127,38 +106,203 @@ impl PoolContract {
         log!(&env, "Blend pools set: USDC={}, XLM={}", blend_pool_usdc, blend_pool_xlm);
     }
 
-    /// Record a deposit (called when funds arrive via muxed address)
-    /// Note: Funds arrive automatically to contract's address via muxed routing
-    /// This function is called by backend to track the deposit
-    pub fn record_deposit(
+    /// Deposit funds for an order (buyer calls directly)
+    /// Transfers tokens from buyer to contract and tracks deposit
+    pub fn deposit(
         env: Env,
+        buyer: Address,
         token: Address,
         amount: i128,
         order_id: u64,
     ) {
-        Self::require_admin(&env);
+        buyer.require_auth();
         
         if amount <= 0 {
             panic!("Invalid amount");
         }
         
+        // Transfer tokens FROM buyer TO contract
+        let client = token::Client::new(&env, &token);
+        client.transfer(&buyer, &env.current_contract_address(), &amount);
+        
+        // Update total deposits
         let usdc_token: Address = env.storage().instance().get(&DataKey::UsdcToken)
             .expect("Not initialized");
-        
+            
         if token == usdc_token {
             let mut total: i128 = env.storage().instance()
                 .get(&DataKey::TotalDepositsUsdc).unwrap_or(0);
             total += amount;
             env.storage().instance().set(&DataKey::TotalDepositsUsdc, &total);
-            log!(&env, "USDC deposit recorded: amount={}, order={}, total={}", amount, order_id, total);
+            log!(&env, "USDC deposit: amount={}, order={}", amount, order_id);
         } else {
             // Assume XLM (native)
             let mut total: i128 = env.storage().instance()
                 .get(&DataKey::TotalDepositsXlm).unwrap_or(0);
             total += amount;
             env.storage().instance().set(&DataKey::TotalDepositsXlm, &total);
-            log!(&env, "XLM deposit recorded: amount={}, order={}, total={}", amount, order_id, total);
+            log!(&env, "XLM deposit: amount={}, order={}", amount, order_id);
         }
+        
+        // Store deposit record (for MSM verification later)
+        let deposit = Deposit {
+            buyer,
+            token,
+            amount,
+            order_id,
+            timestamp: env.ledger().timestamp(),
+        };
+        
+        let mut deposits: Map<u64, Deposit> = env.storage().instance()
+            .get(&DataKey::Deposits).unwrap_or(Map::new(&env));
+            
+        deposits.set(order_id, deposit);
+        env.storage().instance().set(&DataKey::Deposits, &deposits);
+        
+        // Auto-supply to Blend immediately after deposit
+        Self::internal_supply_to_blend(&env);
+    }
+    
+    /// Internal helper to supply funds to Blend (no auth required - called from deposit)
+    fn internal_supply_to_blend(env: &Env) {
+        let usdc_token: Address = match env.storage().instance().get(&DataKey::UsdcToken) {
+            Some(addr) => addr,
+            None => return, // Not initialized
+        };
+        
+        let contract_addr = env.current_contract_address();
+        
+        // =========== SUPPLY USDC ===========
+        let blend_pool_usdc: Option<Address> = env.storage().instance()
+            .get(&DataKey::BlendPoolUsdc);
+        
+        if let Some(pool_addr) = blend_pool_usdc {
+            let usdc_client = token::Client::new(env, &usdc_token);
+            let usdc_balance = usdc_client.balance(&contract_addr);
+            
+            if usdc_balance > 0 {
+                log!(env, "Supplying {} USDC to Blend pool {}", usdc_balance, pool_addr);
+                
+                // Pre-authorize the transfer that Blend will make on our behalf
+                env.authorize_as_current_contract(soroban_sdk::vec![
+                    env,
+                    soroban_sdk::auth::InvokerContractAuthEntry::Contract(
+                        soroban_sdk::auth::SubContractInvocation {
+                            context: soroban_sdk::auth::ContractContext {
+                                contract: usdc_token.clone(),
+                                fn_name: soroban_sdk::Symbol::new(env, "transfer"),
+                                args: soroban_sdk::vec![
+                                    env,
+                                    contract_addr.clone().into_val(env),
+                                    pool_addr.clone().into_val(env),
+                                    usdc_balance.into_val(env),
+                                ],
+                            },
+                            sub_invocations: soroban_sdk::vec![env],
+                        }
+                    )
+                ]);
+                
+                let mut requests: Vec<pool::Request> = Vec::new(env);
+                requests.push_back(pool::Request {
+                    request_type: 2, // SupplyCollateral
+                    address: usdc_token.clone(),
+                    amount: usdc_balance,
+                });
+                
+                let blend_client = pool::Client::new(env, &pool_addr);
+                
+                // Authorize Blend to transfer USDC from this contract
+                env.authorize_as_current_contract(soroban_sdk::vec![
+                    env,
+                    soroban_sdk::auth::InvokerContractAuthEntry::Contract(
+                        soroban_sdk::auth::SubContractInvocation {
+                            context: soroban_sdk::auth::ContractContext {
+                                contract: usdc_token.clone(),
+                                fn_name: soroban_sdk::Symbol::new(env, "transfer"),
+                                args: soroban_sdk::vec![
+                                    env,
+                                    contract_addr.clone().into_val(env),
+                                    pool_addr.clone().into_val(env),
+                                    usdc_balance.into_val(env),
+                                ],
+                            },
+                            sub_invocations: soroban_sdk::vec![env],
+                        }
+                    )
+                ]);
+
+                blend_client.submit(
+                    &contract_addr,
+                    &contract_addr,
+                    &contract_addr,
+                    &requests,
+                );
+                
+                log!(env, "Successfully supplied USDC to Blend pool!");
+            }
+        }
+        
+        // =========== SUPPLY XLM (Wrapped) ===========
+        let blend_pool_xlm: Option<Address> = env.storage().instance()
+            .get(&DataKey::BlendPoolXlm);
+        
+        if let Some(pool_addr) = blend_pool_xlm {
+            // XLM on Soroban is wrapped XLM (SAC)
+            // Use the native XLM SAC address for testnet
+            // CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+            let xlm_sac = soroban_sdk::Address::from_string(
+                &soroban_sdk::String::from_str(env, "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC")
+            );
+            
+            let xlm_client = token::Client::new(env, &xlm_sac);
+            let xlm_balance = xlm_client.balance(&contract_addr);
+            
+            if xlm_balance > 0 {
+                log!(env, "Supplying {} XLM to Blend pool {}", xlm_balance, pool_addr);
+                
+                // Pre-authorize the transfer that Blend will make on our behalf
+                // When Blend calls xlm_sac.transfer(our_contract, blend_pool, amount),
+                // this authorization proves we consent to that transfer
+                env.authorize_as_current_contract(soroban_sdk::vec![
+                    env,
+                    soroban_sdk::auth::InvokerContractAuthEntry::Contract(
+                        soroban_sdk::auth::SubContractInvocation {
+                            context: soroban_sdk::auth::ContractContext {
+                                contract: xlm_sac.clone(),
+                                fn_name: soroban_sdk::Symbol::new(env, "transfer"),
+                                args: soroban_sdk::vec![
+                                    env,
+                                    contract_addr.clone().into_val(env),
+                                    pool_addr.clone().into_val(env),
+                                    xlm_balance.into_val(env),
+                                ],
+                            },
+                            sub_invocations: soroban_sdk::vec![env],
+                        }
+                    )
+                ]);
+                
+                let mut requests: Vec<pool::Request> = Vec::new(env);
+                requests.push_back(pool::Request {
+                    request_type: 2, // SupplyCollateral
+                    address: xlm_sac.clone(),
+                    amount: xlm_balance,
+                });
+                
+                let blend_client = pool::Client::new(env, &pool_addr);
+                blend_client.submit(
+                    &contract_addr,
+                    &contract_addr,
+                    &contract_addr,
+                    &requests,
+                );
+                
+                log!(env, "Successfully supplied XLM to Blend pool!");
+            }
+        }
+        
+        env.storage().instance().set(&DataKey::SuppliedToBlend, &true);
     }
 
     /// Supply funds to Blend pool to earn yield
@@ -216,33 +360,37 @@ impl PoolContract {
             .get(&DataKey::TotalDepositsUsdc).unwrap_or(0);
         let total_xlm: i128 = env.storage().instance()
             .get(&DataKey::TotalDepositsXlm).unwrap_or(0);
-        
-        // Withdraw from Blend if supplied
-        let supplied: bool = env.storage().instance()
-            .get(&DataKey::SuppliedToBlend).unwrap_or(false);
-        
-        if supplied {
-            // Note: In production, call Blend withdraw here
-            log!(&env, "Withdrawing from Blend: USDC={}, XLM={}", total_usdc, total_xlm);
-            env.storage().instance().set(&DataKey::SuppliedToBlend, &false);
-        }
-        
+            
         // Calculate fees (e.g., 2% = 200 basis points)
         let fee_usdc = (total_usdc * fee_percent as i128) / 10000;
         let fee_xlm = (total_xlm * fee_percent as i128) / 10000;
         
+        // Seller gets the rest (98%)
         let seller_usdc = total_usdc - fee_usdc;
         let seller_xlm = total_xlm - fee_xlm;
+        
+        // Withdraw ONLY seller's share from Blend if supplied
+        let supplied: bool = env.storage().instance()
+            .get(&DataKey::SuppliedToBlend).unwrap_or(false);
+        
+        if supplied {
+            // Note: In production, call Blend withdraw here with `seller_usdc` and `seller_xlm`
+            // NOT the full amount. This leaves `fee_usdc` and `fee_xlm` in the pool.
+            log!(&env, "Withdrawing seller share from Blend: USDC={}, XLM={}", seller_usdc, seller_xlm);
+            
+            // We do NOT set SuppliedToBlend to false, because fees remain!
+            // Only set to false if we withdrew everything (which we didn't)
+        }
         
         // Transfer to seller
         if seller_usdc > 0 {
             let client = token::Client::new(&env, &usdc_token);
+            // Ensure we have funds (withdrawn from Blend or just in balance)
             client.transfer(&env.current_contract_address(), &seller, &seller_usdc);
             log!(&env, "Settled {} USDC to seller", seller_usdc);
         }
         
         // For XLM, we'd need to use the native asset wrapper or Stellar operations
-        // Simplified: assume XLM is wrapped as SAC token
         if seller_xlm > 0 {
             // TODO: Handle native XLM transfer
             log!(&env, "Settled {} XLM to seller (pending native handling)", seller_xlm);
@@ -259,12 +407,12 @@ impl PoolContract {
         fees_xlm += fee_xlm;
         env.storage().instance().set(&DataKey::FeesEarnedXlm, &fees_xlm);
         
-        // Reset deposit counters
+        // Reset deposit counters (since we've processed this batch)
         env.storage().instance().set(&DataKey::TotalDepositsUsdc, &0i128);
         env.storage().instance().set(&DataKey::TotalDepositsXlm, &0i128);
         
-        log!(&env, "Settlement complete: seller_usdc={}, seller_xlm={}, fees_usdc={}, fees_xlm={}", 
-             seller_usdc, seller_xlm, fee_usdc, fee_xlm);
+        log!(&env, "Settlement complete: seller shares paid, fees retained in pool. USDC_FEE={}, XLM_FEE={}", 
+             fee_usdc, fee_xlm);
         
         (seller_usdc, seller_xlm)
     }

@@ -3,21 +3,22 @@ import {
     TransactionBuilder,
     TimeoutInfinite,
     rpc,
-    nativeToScVal,
-    scValToNative
+    nativeToScVal
 } from '@stellar/stellar-sdk';
 import albedo from '@albedo-link/intent';
 
-// Contract ID on Testnet
-const CONTRACT_ID = 'CDLLYK6JTLNNDEW3RGH2FNKKFLQLPSV64CGDFZK3WDH5M6QIFIMWAHIB';
+// Pool Contract (Option B) - auto-supplies to Blend after deposits
+// Initialized with Private Blend Environment USDC: CDNZ...
+const POOL_CONTRACT_ID = 'CBCMYJWUHSFJWQ2ZACB2JQMA3SBI47R2HVTG3KSVU5IRW4NBA2RZL6H7';
+
 
 // Backend URL for price API
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
 
 // Native XLM Contract on Testnet (Wrapped)
 export const NATIVE_TOKEN_ID = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
-// Testnet USDC Address (CBIEL...)
-export const TOKEN_ID = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA';
+// Private Blend Testnet USDC (Deployed via mock-example.js)
+export const TOKEN_ID = 'CDNZ44UBKS56UG4SKDZ656T4A23EJDX2ZCTKIYNA25KGD33GS2GCLQFH';
 
 const server = new rpc.Server('https://soroban-testnet.stellar.org:443');
 
@@ -69,31 +70,36 @@ export const soroban = {
         return priceData.xlm_per_usd;
     },
 
+    /**
+     * Deposit funds to Pool Contract for an order
+     * New Option B flow: buyer signs contract invocation directly
+     * 
+     * @param buyerAddress - Buyer's Stellar public key (G...)
+     * @param amount - Token amount as string (e.g., "10.50")
+     * @param orderId - WooCommerce order ID for tracking
+     * @param tokenAddress - Token contract address (defaults to XLM)
+     */
     async deposit(
         buyerAddress: string,
-        _amount: string,
-        targetUsdValue: string,
+        amount: string,
+        orderId: number,
         tokenAddress: string = NATIVE_TOKEN_ID
     ) {
         // 1. Get Account
-        // Note: rpc.Server.getAccount returns an Account object compatible with TransactionBuilder
         const account = await server.getAccount(buyerAddress);
 
-        // 2. Prepare Data
-        const targetVal = Math.floor(parseFloat(targetUsdValue) * 10_000_000);
+        // 2. Convert amount to stroops (7 decimals)
+        const tokenAmountStroops = Math.floor(parseFloat(amount) * 10_000_000);
 
-        // Convert to Stroops (Assuming _amount is the Token Amount String e.g. "5.05")
-        const tokenAmountStroops = Math.floor(parseFloat(_amount) * 10_000_000);
-
-        // 3. Build Transaction
-        const contract = new Contract(CONTRACT_ID);
+        // 3. Build Transaction - New Pool Contract signature:
+        //    deposit(buyer: Address, token: Address, amount: i128, order_id: u64)
+        const contract = new Contract(POOL_CONTRACT_ID);
 
         const op = contract.call('deposit',
-            nativeToScVal(buyerAddress, { type: 'address' }),
-            nativeToScVal('GA65VXDFMPMX6WYWIV47D4T4D2UTBZ7UFTYX6SQPPUMB4LW6UITCEH22', { type: 'address' }), // Seller
-            nativeToScVal(tokenAddress, { type: 'address' }),
-            nativeToScVal(BigInt(tokenAmountStroops), { type: 'i128' }), // Amount
-            nativeToScVal(BigInt(targetVal), { type: 'i128' })  // Target Value
+            nativeToScVal(buyerAddress, { type: 'address' }),      // buyer
+            nativeToScVal(tokenAddress, { type: 'address' }),      // token
+            nativeToScVal(BigInt(tokenAmountStroops), { type: 'i128' }), // amount
+            nativeToScVal(BigInt(orderId), { type: 'u64' })        // order_id
         );
 
         let tx = new TransactionBuilder(account, { fee: '1000' })
@@ -102,7 +108,7 @@ export const soroban = {
             .setNetworkPassphrase("Test SDF Network ; September 2015")
             .build();
 
-        // Prepare transaction (calculate resources fees)
+        // Prepare transaction (calculate resources & fees)
         tx = await server.prepareTransaction(tx);
 
         const xdrTx = tx.toXDR();
@@ -115,19 +121,20 @@ export const soroban = {
         });
 
         // 5. Submit
-        const result = await server.sendTransaction(TransactionBuilder.fromXDR(res.signed_envelope_xdr, "Test SDF Network ; September 2015"));
+        const result = await server.sendTransaction(
+            TransactionBuilder.fromXDR(res.signed_envelope_xdr, "Test SDF Network ; September 2015")
+        );
 
         if (result.status !== 'PENDING') {
             console.error("Tx Result", result);
             throw new Error(`Transaction failed: ${result.status}`);
         }
 
-        // 6. Wait for transaction success and extract escrow_id
+        // 6. Wait for transaction confirmation
         console.log("Waiting for transaction confirmation...");
         let txResult = await server.getTransaction(result.hash);
 
-        // Simple polling
-        while (txResult.status === 'NOT_FOUND' || txResult.status === 'SUCCESS' && !txResult.resultMetaXdr) {
+        while (txResult.status === 'NOT_FOUND') {
             await new Promise(resolve => setTimeout(resolve, 1000));
             txResult = await server.getTransaction(result.hash);
         }
@@ -136,21 +143,13 @@ export const soroban = {
             throw new Error('Transaction failed after submission');
         }
 
-        // Extract the return value (u64)
-        // txResult.resultXdr contains the TransactionResult
-        // In Soroban, the return value of the contract function is in the resultValue of the InvokeHostFunction result
-        const resultValue = txResult.returnValue;
-        let escrowId: number | undefined;
-        if (resultValue) {
-            escrowId = scValToNative(resultValue);
-        }
-
-        return { tx_hash: result.hash, escrow_id: escrowId };
+        // Return transaction hash (no escrow_id in new flow, order_id is used instead)
+        return { tx_hash: result.hash, order_id: orderId };
     },
 
     async releaseEscrow(escrowId: number, adminAddress: string) {
         const account = await server.getAccount(adminAddress);
-        const contract = new Contract(CONTRACT_ID);
+        const contract = new Contract(POOL_CONTRACT_ID);
         const op = contract.call('release', nativeToScVal(escrowId, { type: 'u64' }));
 
         let tx = new TransactionBuilder(account, { fee: '1000' })
@@ -193,6 +192,45 @@ export const soroban = {
             xdr: tx.toXDR(),
             network: 'testnet',
             submit: true // Submit directly
+        });
+
+        return res.tx_hash;
+    },
+
+    /**
+     * Burn ZMOKE tokens by sending them to the Treasury address
+     * This is used for the "Redeem for Store Credit" flow
+     * 
+     * @param senderAddress - User's Stellar public key
+     * @param amount - ZMOKE amount to burn as string (e.g., "100.00")
+     * @param treasuryAddress - Treasury address that receives the "burned" tokens
+     * @returns Transaction hash
+     */
+    async burnZmokeForCredit(senderAddress: string, amount: string, treasuryAddress: string): Promise<string> {
+        const { Asset, Operation, Horizon, TransactionBuilder: ClassicBuilder } = await import('@stellar/stellar-sdk');
+
+        const horizonServer = new Horizon.Server('https://horizon-testnet.stellar.org');
+        const account = await horizonServer.loadAccount(senderAddress);
+
+        // ZMOKE Issuer from keys.md
+        const ZMOKE_ISSUER = 'GC3V72IIUGZWHXI3AV3P7TAHYX7SLSX7HHXD7ERD33NQV3OFGED4GW7L';
+        const zmokeAsset = new Asset('ZMOKE', ZMOKE_ISSUER);
+
+        const tx = new ClassicBuilder(account, { fee: '100' })
+            .addOperation(Operation.payment({
+                destination: treasuryAddress,
+                asset: zmokeAsset,
+                amount: amount
+            }))
+            .setTimeout(30)
+            .setNetworkPassphrase("Test SDF Network ; September 2015")
+            .build();
+
+        // Sign with Albedo
+        const res = await albedo.tx({
+            xdr: tx.toXDR(),
+            network: 'testnet',
+            submit: true
         });
 
         return res.tx_hash;

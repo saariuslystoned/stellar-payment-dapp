@@ -74,6 +74,7 @@ func main() {
 	// Endpoints (wrapped with CORS for frontend access)
 	http.HandleFunc("/webhook/pending-order", handlePendingOrder)
 	http.HandleFunc("/escrow/link", corsMiddleware(handleEscrowLink))
+	http.HandleFunc("/payment/confirm", corsMiddleware(handlePaymentConfirm)) // Option B: direct contract deposits
 	http.HandleFunc("/health", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
@@ -84,8 +85,12 @@ func main() {
 	// Price endpoint for live XLM/USD rates
 	http.HandleFunc("/price/xlm", corsMiddleware(handlePriceXLM))
 
-	// Start Horizon watcher in background
-	go watchHorizonEvents()
+	// ZMOKE Spending Integration endpoints
+	http.HandleFunc("/api/enroll-user", corsMiddleware(handleEnrollUser))
+	http.HandleFunc("/api/convert-zmoke", corsMiddleware(handleConvertZmoke))
+
+	// Option B: Disabled old escrow watcher - using /payment/confirm now
+	// go watchHorizonEvents()
 
 	fmt.Printf("🚀 Smoky Coins Backend listening on %s\n", Port)
 	fmt.Printf("   Escrow Contract: %s\n", PaymentEscrowID)
@@ -273,6 +278,169 @@ func handleEscrowLink(w http.ResponseWriter, r *http.Request) {
 		"status":  "success",
 		"message": "Order updated to processing, escrow release initiated",
 	})
+}
+
+// PaymentConfirmRequest for Option B direct contract deposits
+type PaymentConfirmRequest struct {
+	OrderID      int    `json:"order_id"`
+	BuyerAddress string `json:"buyer_address"`
+	TxHash       string `json:"tx_hash"`
+	Token        string `json:"token"`
+	Amount       string `json:"amount"`
+}
+
+// handlePaymentConfirm handles Option B direct contract deposit confirmations
+// Unlike escrow flow, funds go directly to the Pool Contract - no release needed
+func handlePaymentConfirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PaymentConfirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("💳 Payment confirm received: Order #%d, TxHash: %s", req.OrderID, req.TxHash)
+
+	// Get order total from pending orders (for ZMOKE calculation)
+	var orderTotal float64
+	mu.Lock()
+	if po, exists := pendingOrders[req.OrderID]; exists {
+		po.BuyerAddress = req.BuyerAddress
+		orderTotal = po.Total
+		log.Printf("📋 Found Order #%d in pending orders, total: $%.2f", req.OrderID, orderTotal)
+	}
+	mu.Unlock()
+
+	// Fetch full order from WooCommerce (need meta for enrollment check)
+	var billingEmail string
+	var enrollmentRequested bool
+	var existingUserID int
+
+	if order, err := wcClient.GetOrder(req.OrderID); err == nil && order != nil {
+		billingEmail = order.Billing.Email
+
+		// Fallback: get total from WC if not in pending orders
+		if orderTotal == 0 {
+			if parsedTotal, parseErr := strconv.ParseFloat(order.Total, 64); parseErr == nil {
+				orderTotal = parsedTotal
+				log.Printf("📋 Fetched Order #%d total from WC: $%.2f", req.OrderID, orderTotal)
+			}
+		}
+
+		// Check if enrollment was requested and get customer ID
+		for _, meta := range order.MetaData {
+			if meta.Key == "_smoky_zmoke_enrollment_requested" && meta.Value == "yes" {
+				enrollmentRequested = true
+			}
+		}
+
+		// Get customer ID from order (will be used below)
+		existingUserID = getOrderCustomerID(order)
+	} else {
+		log.Printf("⚠️ Could not fetch order #%d: %v", req.OrderID, err)
+	}
+
+	// Update WC order status to processing
+	if err := wcClient.UpdateOrderStatus(req.OrderID, "processing", req.TxHash); err != nil {
+		log.Printf("⚠️ Failed to update WC order status: %v", err)
+		http.Error(w, "Failed to update WooCommerce: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Add visible order note with tx hash link
+	txURL := fmt.Sprintf("https://stellar.expert/explorer/testnet/tx/%s", req.TxHash)
+	txNote := fmt.Sprintf(`💫 Stellar payment received via Pool Contract! <a href="%s" target="_blank">View Transaction</a>`, txURL)
+	if err := wcClient.AddOrderNote(req.OrderID, txNote); err != nil {
+		log.Printf("⚠️ Failed to add order note: %v", err)
+	}
+
+	log.Printf("✅ Order #%d updated to PROCESSING (Option B). Tx: %s", req.OrderID, req.TxHash)
+
+	// === ZMOKE ENROLLMENT ===
+	// If enrollment was requested, create user + wallet
+	var walletInfo *EnrollResponse
+	if enrollmentRequested && billingEmail != "" {
+		log.Printf("🔐 Enrollment requested for order #%d, email: %s", req.OrderID, billingEmail)
+
+		userID := existingUserID
+
+		// Create user if guest checkout (no user ID)
+		if userID == 0 {
+			log.Printf("👤 Guest checkout - creating WooCommerce user...")
+			newUserID, err := createWooUser(billingEmail)
+			if err != nil {
+				log.Printf("⚠️ Failed to create WC user: %v", err)
+			} else {
+				userID = newUserID
+				log.Printf("✅ Created WooCommerce user ID: %d", userID)
+				// Link the order to the new user
+				linkOrderToUser(req.OrderID, userID)
+			}
+		}
+
+		// Generate wallet
+		if userID > 0 {
+			wallet, err := performEnrollment(userID)
+			if err != nil {
+				log.Printf("⚠️ Failed to enroll user: %v", err)
+				wcClient.AddOrderNote(req.OrderID, fmt.Sprintf("⚠️ Wallet enrollment failed: %v", err))
+			} else {
+				walletInfo = wallet
+				log.Printf("🎉 User %d enrolled with wallet %s", userID, wallet.PublicKey)
+				wcClient.AddOrderNote(req.OrderID, fmt.Sprintf(
+					"🔑 ZMOKE Wallet created! Key: %s...%s",
+					wallet.PublicKey[:8], wallet.PublicKey[len(wallet.PublicKey)-4:],
+				))
+			}
+		}
+	}
+
+	// === ZMOKE REWARDS ===
+	// Distribute ZMOKE tokens to buyer ($1 = 10 ZMOKE)
+	go func() {
+		if req.BuyerAddress != "" && orderTotal > 0 {
+			zmokeAmount := int64(orderTotal * 10)
+			log.Printf("🪙 Distributing %d ZMOKE to %s...", zmokeAmount, req.BuyerAddress)
+
+			if zmokeTxHash, err := distributeZmoke(req.BuyerAddress, zmokeAmount); err != nil {
+				log.Printf("⚠️ Failed to distribute ZMOKE: %v", err)
+				wcClient.AddOrderNote(req.OrderID, fmt.Sprintf("⚠️ ZMOKE distribution failed: %v", err))
+			} else {
+				log.Printf("✅ Distributed %d ZMOKE to %s", zmokeAmount, req.BuyerAddress)
+				zmokeURL := fmt.Sprintf("https://stellar.expert/explorer/testnet/tx/%s", zmokeTxHash)
+				zmokeNote := fmt.Sprintf(`🪙 Rewarded buyer with %d ZMOKE tokens! <a href="%s" target="_blank">View ZMOKE TX</a>`, zmokeAmount, zmokeURL)
+				wcClient.AddOrderNote(req.OrderID, zmokeNote)
+			}
+		}
+
+		// Clean up pending order
+		mu.Lock()
+		delete(pendingOrders, req.OrderID)
+		mu.Unlock()
+	}()
+
+	// Build response
+	response := map[string]interface{}{
+		"status":  "success",
+		"message": "Payment confirmed, order updated to processing",
+	}
+
+	// Include wallet info if enrollment happened
+	if walletInfo != nil {
+		response["wallet"] = map[string]string{
+			"public_key": walletInfo.PublicKey,
+			"secret_key": walletInfo.SecretKey,
+			"message":    walletInfo.Message,
+		}
+		response["user_id"] = walletInfo.UserID
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // watchHorizonEvents polls for deposit events on the escrow contract

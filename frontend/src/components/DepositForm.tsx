@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Horizon } from '@stellar/stellar-sdk';
 import { soroban, TOKEN_ID, NATIVE_TOKEN_ID } from '../services/soroban';
+import { SecretKeyModal } from './SecretKeyModal';
 
 const { Server } = Horizon;
 
@@ -22,6 +23,10 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
     const [claimStatus, setClaimStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
     const [paidTokenAmount, setPaidTokenAmount] = useState<string>('');
     const [paidTokenSymbol, setPaidTokenSymbol] = useState<string>('');
+
+    // Wallet enrollment state (from backend)
+    const [walletInfo, setWalletInfo] = useState<{ public_key: string; secret_key: string; message: string } | null>(null);
+    const [showSecretKeyModal, setShowSecretKeyModal] = useState(false);
 
     // Live XLM price from Reflector Oracle
     const [xlmPrice, setXlmPrice] = useState<{ xlmPerUsd: number; priceUsd: number } | null>(null);
@@ -131,12 +136,13 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
 
             setMessage('Sign the transaction in your wallet...');
 
-            // 2. Submit Transaction
-            // Args: buyer, tokenAmount, targetUsdValue (string), tokenAddress
+            // 2. Submit Transaction to Pool Contract
+            // New signature: deposit(buyerAddress, tokenAmount, orderId, tokenAddress)
+            const orderIdNum = orderId ? parseInt(orderId, 10) : Date.now(); // Use timestamp if no orderId
             const result = await soroban.deposit(
                 buyerAddress,
                 totalTokenAmount,
-                amount, // "1" (Target USD Value)
+                orderIdNum,
                 selectedToken
             );
             console.log("Tx Result:", result);
@@ -146,33 +152,41 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
             setTxHash(result.tx_hash);
             setPaidTokenAmount(totalTokenAmount);
             setPaidTokenSymbol(tokenSymbol);
-            if (result.escrow_id) {
-                const eId = result.escrow_id.toString();
-                setEscrowId(eId);
 
-                // If this is a checkout flow (orderId present), link it in backend
-                if (orderId) {
-                    setMessage('Linking payment to order...');
-                    try {
-                        // Use env var for backend URL or default to localhost for dev
-                        const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
-                        await fetch(`${backendUrl}/escrow/link`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                order_id: Number(orderId),
-                                escrow_id: eId,
-                                buyer_address: buyerAddress,
-                                tx_hash: result.tx_hash
-                            })
-                        });
-                        console.log("Linked Order #" + orderId + " to Escrow " + eId);
-                    } catch (linkErr) {
-                        console.error("Failed to link escrow:", linkErr);
-                        // Don't fail the UI, just log it. Backend watcher might catch it via text memo eventually if we added that, 
-                        // but for now relying on this call.
-                        setMessage('Deposit successful, but failed to update order status. Please contact support.');
+            // No escrow_id in new flow - orderId is the tracking ID
+            if (orderId) {
+                setMessage('Confirming payment with backend...');
+                try {
+                    // Use env var for backend URL or default to localhost for dev
+                    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
+                    const confirmResponse = await fetch(`${backendUrl}/payment/confirm`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'ngrok-skip-browser-warning': 'true'
+                        },
+                        body: JSON.stringify({
+                            order_id: orderIdNum,
+                            buyer_address: buyerAddress,
+                            tx_hash: result.tx_hash,
+                            token: selectedToken,
+                            amount: totalTokenAmount
+                        })
+                    });
+
+                    const confirmData = await confirmResponse.json();
+                    console.log("Payment confirmed for Order #" + orderId, confirmData);
+                    setMessage('Payment confirmed!');
+
+                    // Check if wallet was created during enrollment
+                    if (confirmData.wallet && confirmData.wallet.secret_key) {
+                        setWalletInfo(confirmData.wallet);
+                        setShowSecretKeyModal(true);
                     }
+                } catch (confirmErr) {
+                    console.error("Failed to confirm payment:", confirmErr);
+                    // Don't fail the UI - the tx is on-chain regardless
+                    setMessage('Deposit successful! Order status will update shortly.');
                 }
             }
 
@@ -195,126 +209,136 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
     // Success state - show transaction complete view
     if (status === 'success') {
         return (
-            <div className="w-full max-w-md p-5 bg-slate-800/50 rounded-xl border border-slate-700 backdrop-blur-sm">
-                <div className="text-center space-y-4">
-                    {/* Success Icon */}
-                    <div className="relative mx-auto w-16 h-16">
-                        <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping"></div>
-                        <div className="relative w-16 h-16 bg-gradient-to-br from-emerald-500 to-green-600 rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30">
-                            <span className="text-3xl">✓</span>
+            <>
+                {/* Secret Key Modal - shown when new wallet was created */}
+                {showSecretKeyModal && walletInfo && walletInfo.secret_key && (
+                    <SecretKeyModal
+                        publicKey={walletInfo.public_key}
+                        secretKey={walletInfo.secret_key}
+                        onClose={() => setShowSecretKeyModal(false)}
+                    />
+                )}
+
+                <div className="w-full max-w-md p-5 bg-slate-800/50 rounded-xl border border-slate-700 backdrop-blur-sm">
+                    <div className="text-center space-y-4">
+                        {/* Success Icon */}
+                        <div className="relative mx-auto w-16 h-16">
+                            <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping"></div>
+                            <div className="relative w-16 h-16 bg-gradient-to-br from-emerald-500 to-green-600 rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                                <span className="text-3xl">✓</span>
+                            </div>
                         </div>
-                    </div>
 
-                    {/* Success Message */}
-                    <div>
-                        <h3 className="text-xl font-bold text-white mb-1">Transaction Complete!</h3>
-                        <p className="text-slate-400 text-sm">Your deposit has been successfully processed.</p>
-                    </div>
-
-                    {/* Transaction Details Card */}
-                    <div className="p-3 bg-slate-900/70 rounded-lg border border-emerald-900/50 text-left space-y-2">
-                        <div className="flex justify-between items-center">
-                            <span className="text-slate-400 text-xs">Checkout Price</span>
-                            <span className="text-emerald-400 font-bold font-mono text-sm">${amount} USD</span>
+                        {/* Success Message */}
+                        <div>
+                            <h3 className="text-xl font-bold text-white mb-1">Transaction Complete!</h3>
+                            <p className="text-slate-400 text-sm">Your deposit has been successfully processed.</p>
                         </div>
-                        {paidTokenSymbol === 'XLM' && (
+
+                        {/* Transaction Details Card */}
+                        <div className="p-3 bg-slate-900/70 rounded-lg border border-emerald-900/50 text-left space-y-2">
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400 text-xs">Amount Sent</span>
-                                <span className="text-cyan-400 font-bold font-mono text-sm">{parseFloat(paidTokenAmount).toFixed(2)} XLM</span>
+                                <span className="text-slate-400 text-xs">Checkout Price</span>
+                                <span className="text-emerald-400 font-bold font-mono text-sm">${amount} USD</span>
                             </div>
-                        )}
-                        {escrowId && (
-                            <div className="flex justify-between items-center">
-                                <span className="text-slate-400 text-xs">Escrow ID</span>
-                                <span className="text-blue-400 font-bold font-mono text-sm">#{escrowId}</span>
-                            </div>
-                        )}
-                        {txHash && (
-                            <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
-                                <span className="text-slate-500 text-xs">Transaction Hash</span>
-                                <a
-                                    href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-slate-300 text-xs font-mono hover:text-white transition-colors underline decoration-slate-600"
-                                >
-                                    {txHash.substring(0, 8)}...{txHash.substring(txHash.length - 8)}
-                                </a>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* ZMOKE Rewards Section - After TX Hash */}
-                    {txHash && (
-                        <div className="mt-2 p-2.5 bg-purple-900/30 rounded-lg border border-purple-700/50">
-                            <div className="flex items-center justify-between mb-2">
-                                <span className="text-purple-300 font-semibold text-xs">🪙 ZMOKE Rewards</span>
-                            </div>
-
-                            {/* Only show detailed breakdown when we have trustline and balance */}
-                            {hasZmokeTrustline && zmokeBalance !== null && (
-                                <div className="space-y-1 text-xs">
-                                    {/* Current Balance */}
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-slate-400">Current Balance</span>
-                                        <span className="text-purple-400 font-mono">{parseFloat(zmokeBalance).toFixed(2)} ZMOKE</span>
-                                    </div>
-
-                                    {/* Earned from this purchase */}
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-slate-400">Earned (${Number(amount).toFixed(2)} × 10)</span>
-                                        <span className="text-emerald-400 font-mono">+{(Number(amount) * 10).toFixed(2)} ZMOKE</span>
-                                    </div>
-
-                                    {/* Divider */}
-                                    <div className="border-t border-purple-700/50 my-1"></div>
-
-                                    {/* New Total */}
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-purple-200 font-medium">After Distribution</span>
-                                        <span className="text-purple-300 font-mono font-bold">{(parseFloat(zmokeBalance) + Number(amount) * 10).toFixed(2)} ZMOKE</span>
-                                    </div>
-
-                                    <p className="text-slate-500 text-[10px] mt-1">⏳ ZMOKE distributed after escrow clears</p>
+                            {paidTokenSymbol === 'XLM' && (
+                                <div className="flex justify-between items-center">
+                                    <span className="text-slate-400 text-xs">Amount Sent</span>
+                                    <span className="text-cyan-400 font-bold font-mono text-sm">{parseFloat(paidTokenAmount).toFixed(2)} XLM</span>
                                 </div>
                             )}
-
-                            {!hasZmokeTrustline && claimStatus !== 'success' && (
-                                <div className="space-y-2">
-                                    <p className="text-slate-400 text-xs">Add ZMOKE to your wallet to receive rewards</p>
-                                    <button
-                                        onClick={handleClaimZmoke}
-                                        disabled={claimStatus === 'loading'}
-                                        className={`w-full py-1.5 text-xs font-bold rounded-lg transition-all ${claimStatus === 'loading'
-                                            ? 'bg-purple-800 text-purple-400 cursor-wait'
-                                            : claimStatus === 'error'
-                                                ? 'bg-red-600 hover:bg-red-500 text-white'
-                                                : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white'
-                                            }`}
+                            {escrowId && (
+                                <div className="flex justify-between items-center">
+                                    <span className="text-slate-400 text-xs">Escrow ID</span>
+                                    <span className="text-blue-400 font-bold font-mono text-sm">#{escrowId}</span>
+                                </div>
+                            )}
+                            {txHash && (
+                                <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
+                                    <span className="text-slate-500 text-xs">Transaction Hash</span>
+                                    <a
+                                        href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-slate-300 text-xs font-mono hover:text-white transition-colors underline decoration-slate-600"
                                     >
-                                        {claimStatus === 'loading' ? 'Adding ZMOKE...' : claimStatus === 'error' ? 'Try Again' : 'Claim ZMOKE Rewards'}
-                                    </button>
+                                        {txHash.substring(0, 8)}...{txHash.substring(txHash.length - 8)}
+                                    </a>
                                 </div>
                             )}
-
-                            {/* If trustline just claimed, show brief confirmation */}
-                            {claimStatus === 'success' && !hasZmokeTrustline && (
-                                <p className="text-emerald-400 text-xs">✅ ZMOKE added to wallet!</p>
-                            )}
                         </div>
-                    )}
 
-                    {/* Action Button - Only show in DApp mode, not Checkout */}
-                    {!orderId && (
-                        <button
-                            onClick={resetForm}
-                            className="w-full py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-lg transition-all shadow-lg hover:shadow-emerald-500/20 text-sm"
-                        >
-                            Make Another Transaction
-                        </button>
-                    )}
+                        {/* ZMOKE Rewards Section - After TX Hash */}
+                        {txHash && (
+                            <div className="mt-2 p-2.5 bg-purple-900/30 rounded-lg border border-purple-700/50">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-purple-300 font-semibold text-xs">🪙 ZMOKE Rewards</span>
+                                </div>
+
+                                {/* Only show detailed breakdown when we have trustline and balance */}
+                                {hasZmokeTrustline && zmokeBalance !== null && (
+                                    <div className="space-y-1 text-xs">
+                                        {/* Current Balance */}
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-slate-400">Current Balance</span>
+                                            <span className="text-purple-400 font-mono">{parseFloat(zmokeBalance).toFixed(2)} ZMOKE</span>
+                                        </div>
+
+                                        {/* Earned from this purchase */}
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-slate-400">Earned (${Number(amount).toFixed(2)} × 10)</span>
+                                            <span className="text-emerald-400 font-mono">+{(Number(amount) * 10).toFixed(2)} ZMOKE</span>
+                                        </div>
+
+                                        {/* Divider */}
+                                        <div className="border-t border-purple-700/50 my-1"></div>
+
+                                        {/* New Total */}
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-purple-200 font-medium">After Distribution</span>
+                                            <span className="text-purple-300 font-mono font-bold">{(parseFloat(zmokeBalance) + Number(amount) * 10).toFixed(2)} ZMOKE</span>
+                                        </div>
+
+                                        <p className="text-slate-500 text-[10px] mt-1">⏳ ZMOKE distributed after escrow clears</p>
+                                    </div>
+                                )}
+
+                                {!hasZmokeTrustline && claimStatus !== 'success' && (
+                                    <div className="space-y-2">
+                                        <p className="text-slate-400 text-xs">Add ZMOKE to your wallet to receive rewards</p>
+                                        <button
+                                            onClick={handleClaimZmoke}
+                                            disabled={claimStatus === 'loading'}
+                                            className={`w-full py-1.5 text-xs font-bold rounded-lg transition-all ${claimStatus === 'loading'
+                                                ? 'bg-purple-800 text-purple-400 cursor-wait'
+                                                : claimStatus === 'error'
+                                                    ? 'bg-red-600 hover:bg-red-500 text-white'
+                                                    : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white'
+                                                }`}
+                                        >
+                                            {claimStatus === 'loading' ? 'Adding ZMOKE...' : claimStatus === 'error' ? 'Try Again' : 'Claim ZMOKE Rewards'}
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* If trustline just claimed, show brief confirmation */}
+                                {claimStatus === 'success' && !hasZmokeTrustline && (
+                                    <p className="text-emerald-400 text-xs">✅ ZMOKE added to wallet!</p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Action Button - Only show in DApp mode, not Checkout */}
+                        {!orderId && (
+                            <button
+                                onClick={resetForm}
+                            >
+                                Make Another Transaction
+                            </button>
+                        )}
+                    </div>
                 </div>
-            </div>
+            </>
         );
     }
 
