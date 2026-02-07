@@ -29,6 +29,10 @@ lerna-debug.log*
 .env.*
 !.env.example
 
+# secret key files
+.keys/
+keys.md
+
 # easy way to create temporary local-only files and folders
 *.local.*
 
