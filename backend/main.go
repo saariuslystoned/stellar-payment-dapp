@@ -17,6 +17,9 @@ import (
 
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/keypair"
+	"github.com/stellar/go/network"
+	"github.com/stellar/go/txnbuild"
+	xdr3 "github.com/stellar/go/xdr"
 )
 
 // Config
@@ -77,6 +80,9 @@ func main() {
 	// ZMOKE Spending Integration endpoints
 	http.HandleFunc("/api/enroll-user", corsMiddleware(handleEnrollUser))
 	http.HandleFunc("/api/convert-zmoke", corsMiddleware(handleConvertZmoke))
+
+	// Fee-bump proxy: sponsors gas fees for buyer transactions
+	http.HandleFunc("/tx/submit", corsMiddleware(handleFeeBumpSubmit))
 
 
 	fmt.Printf("🚀 Smoky Coins Backend listening on %s\n", Port)
@@ -522,6 +528,161 @@ func handleOrderCompleted(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("📦 Legacy: Order #%d: %s for %s", order.ID, order.Status, order.Total)
 	w.WriteHeader(http.StatusOK)
+}
+
+// ============================================================
+// FEE-BUMP PROXY: Sponsors gas fees for buyer transactions
+// ============================================================
+
+// handleFeeBumpSubmit receives a buyer-signed Soroban XDR, fee-bumps it
+// with the oracle account (so buyer doesn't need XLM for gas), and submits.
+func handleFeeBumpSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request
+	var req struct {
+		XDR string `json:"xdr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.XDR == "" {
+		http.Error(w, `{"error":"Missing or invalid 'xdr' field"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Load oracle keypair for fee sponsorship
+	oracleSecret := os.Getenv("ORACLE_POOL_SECRET")
+	if oracleSecret == "" {
+		log.Println("❌ ORACLE_POOL_SECRET not set")
+		http.Error(w, `{"error":"Fee sponsor not configured"}`, http.StatusInternalServerError)
+		return
+	}
+	oracleKP, err := keypair.ParseFull(oracleSecret)
+	if err != nil {
+		log.Printf("❌ Invalid oracle keypair: %v", err)
+		http.Error(w, `{"error":"Fee sponsor key error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the buyer-signed transaction
+	var envelope xdr3.TransactionEnvelope
+	if err := xdr3.SafeUnmarshalBase64(req.XDR, &envelope); err != nil {
+		log.Printf("❌ Invalid XDR: %v", err)
+		http.Error(w, `{"error":"Invalid transaction XDR"}`, http.StatusBadRequest)
+		return
+	}
+
+	genericTx, err := txnbuild.TransactionFromXDR(req.XDR)
+	if err != nil {
+		log.Printf("❌ Failed to parse transaction: %v", err)
+		http.Error(w, `{"error":"Failed to parse transaction"}`, http.StatusBadRequest)
+		return
+	}
+
+	innerTx, ok := genericTx.Transaction()
+	if !ok {
+		http.Error(w, `{"error":"Expected a Transaction, got FeeBumpTransaction"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Build fee-bump transaction
+	// Use 10x the inner fee to ensure it covers Soroban resource fees
+	innerFee := innerTx.BaseFee()
+	bumpFee := innerFee * 10
+	if bumpFee < 10000 {
+		bumpFee = 10000 // minimum 0.001 XLM
+	}
+
+	feeBumpTx, err := txnbuild.NewFeeBumpTransaction(txnbuild.FeeBumpTransactionParams{
+		Inner:      innerTx,
+		FeeAccount: oracleKP.Address(),
+		BaseFee:    bumpFee,
+	})
+	if err != nil {
+		log.Printf("❌ Failed to build fee-bump: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to build fee-bump: %s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	// Sign fee-bump with oracle keypair
+	feeBumpTx, err = feeBumpTx.Sign(network.TestNetworkPassphrase, oracleKP)
+	if err != nil {
+		log.Printf("❌ Failed to sign fee-bump: %v", err)
+		http.Error(w, `{"error":"Failed to sign fee-bump"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Submit to Soroban RPC
+	feeBumpXDR, err := feeBumpTx.Base64()
+	if err != nil {
+		log.Printf("❌ Failed to encode fee-bump: %v", err)
+		http.Error(w, `{"error":"Failed to encode fee-bump"}`, http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("⛽ Fee-bumping tx for buyer (oracle: %s...)", oracleKP.Address()[:10])
+
+	// Submit to Soroban RPC via JSON-RPC (not CLI, which returns full result blob)
+	rpcURL := "https://soroban-testnet.stellar.org:443"
+
+	rpcReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "sendTransaction",
+		"params": map[string]string{
+			"transaction": feeBumpXDR,
+		},
+	}
+	rpcBody, _ := json.Marshal(rpcReq)
+
+	resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(rpcBody))
+	if err != nil {
+		log.Printf("❌ RPC request failed: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"RPC request failed: %s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	var rpcResp struct {
+		Result struct {
+			Hash   string `json:"hash"`
+			Status string `json:"status"`
+			ErrorResultXDR string `json:"errorResultXdr"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+			Code    int    `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		log.Printf("❌ Failed to parse RPC response: %v", err)
+		http.Error(w, `{"error":"Failed to parse RPC response"}`, http.StatusBadGateway)
+		return
+	}
+
+	if rpcResp.Error != nil {
+		log.Printf("❌ RPC error: %s (code %d)", rpcResp.Error.Message, rpcResp.Error.Code)
+		http.Error(w, fmt.Sprintf(`{"error":"RPC error: %s"}`, rpcResp.Error.Message), http.StatusBadGateway)
+		return
+	}
+
+	txHash := rpcResp.Result.Hash
+	txStatus := rpcResp.Result.Status
+
+	if txStatus == "ERROR" || txStatus == "FAILED" {
+		log.Printf("❌ Transaction rejected: status=%s error=%s", txStatus, rpcResp.Result.ErrorResultXDR)
+		http.Error(w, fmt.Sprintf(`{"error":"Transaction rejected: %s"}`, txStatus), http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("⛽ Fee-bumped tx submitted: hash=%s status=%s", txHash, txStatus)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_hash": txHash,
+		"status":  txStatus,
+	})
 }
 
 // ============================================================

@@ -135,26 +135,42 @@ export const soroban = {
       submit: false,
     });
 
-    // 5. Submit
-    const result = await server.sendTransaction(
-      TransactionBuilder.fromXDR(
-        res.signed_envelope_xdr,
-        "Test SDF Network ; September 2015",
-      ),
-    );
+    // 5. Submit via backend fee-bump proxy (oracle sponsors gas fees)
+    const submitRes = await fetch(`${BACKEND_URL}/tx/submit`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+      },
+      body: JSON.stringify({ xdr: res.signed_envelope_xdr }),
+    });
 
-    if (result.status !== "PENDING") {
-      console.error("Tx Result", result);
-      throw new Error(`Transaction failed: ${result.status}`);
+    if (!submitRes.ok) {
+      const errData = (await submitRes.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      throw new Error(
+        errData.error ?? `Fee-bump submission failed: ${submitRes.status}`,
+      );
+    }
+
+    const submitData = (await submitRes.json()) as {
+      tx_hash: string;
+      status: string;
+    };
+    const txHash = submitData.tx_hash;
+
+    if (!txHash) {
+      throw new Error("No transaction hash returned from fee-bump proxy");
     }
 
     // 6. Wait for transaction confirmation
     console.log("Waiting for transaction confirmation...");
-    let txResult = await server.getTransaction(result.hash);
+    let txResult = await server.getTransaction(txHash);
 
     while ((txResult.status as string) === "NOT_FOUND") {
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      txResult = await server.getTransaction(result.hash);
+      txResult = await server.getTransaction(txHash);
     }
 
     if ((txResult.status as string) === "FAILED") {
@@ -162,7 +178,7 @@ export const soroban = {
     }
 
     // Return transaction hash (no escrow_id in new flow, order_id is used instead)
-    return { tx_hash: result.hash, order_id: orderId };
+    return { tx_hash: txHash, order_id: orderId };
   },
 
   async releaseEscrow(escrowId: number, adminAddress: string) {
