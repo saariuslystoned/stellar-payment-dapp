@@ -4,7 +4,7 @@
 The Stellar Payment DApp has been successfully upgraded to use the **Reflector Oracle** for on-chain price validation. The previously used off-chain Python signature mechanism has been removed.
 
 ## Key Changes
-1.  **Smart Contract (`payment_escrow`)**:
+1.  **Smart Contract**: `pool_contract` (replaces legacy `payment_escrow`)
     *   Updated to verify XLM/USD prices directly on-chain using the Reflector Oracle.
     *   Implemented `Asset` enum to support both Stellar Assets and future types.
     *   Refactored `deposit` function to accept `target_usd_value` and validate it against the oracle price.

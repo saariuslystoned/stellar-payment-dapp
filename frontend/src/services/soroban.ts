@@ -7,9 +7,9 @@ import {
 } from '@stellar/stellar-sdk';
 import albedo from '@albedo-link/intent';
 
-// Pool Contract (Option B) - auto-supplies to Blend after deposits
-// Initialized with Private Blend Environment USDC: CDNZ...
-const POOL_CONTRACT_ID = 'CBCMYJWUHSFJWQ2ZACB2JQMA3SBI47R2HVTG3KSVU5IRW4NBA2RZL6H7';
+// Pool Contract (Option B) - auto-supplies Blend USDC & XLM to Blend for yield
+// Supports 3 tokens: Circle USDC (CDNZ...), Blend USDC (CAQC...), XLM
+const POOL_CONTRACT_ID = 'CCHVVL26PYRYRJR4OXEEAHNHMP6OAPEJT26EZRZXVDYL3HWHCD5SEDON';
 
 
 // Backend URL for price API
@@ -17,8 +17,10 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
 
 // Native XLM Contract on Testnet (Wrapped)
 export const NATIVE_TOKEN_ID = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
-// Private Blend Testnet USDC (Deployed via mock-example.js)
+// Circle USDC (Private Blend Testnet — deployed via mock-example.js)
 export const TOKEN_ID = 'CDNZ44UBKS56UG4SKDZ656T4A23EJDX2ZCTKIYNA25KGD33GS2GCLQFH';
+// Blend Testnet USDC
+export const BLEND_TOKEN_ID = 'CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU';
 
 const server = new rpc.Server('https://soroban-testnet.stellar.org:443');
 

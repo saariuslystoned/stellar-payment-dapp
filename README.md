@@ -4,12 +4,14 @@ A secure, oracle-backed payment escrow platform on the Stellar network (Soroban)
 
 ## ✨ Key Features
 
-- **🏦 Blend Protocol Integration**: Deposited funds (USDC & XLM) automatically supply to Blend for yield
+- **🏦 Blend Protocol Integration**: Deposited funds (Blend USDC & XLM) automatically supply to Blend for yield
+- **💰 BLND Emission Claiming**: Pool contract can claim accrued BLND token rewards via `claim_emissions()`
 - **🛒 WooCommerce Ready**: Payment gateway plugin with customer enrollment and wallet management
 - **🪙 ZMOKE Rewards**: Buyers earn ZMOKE tokens ($1 spent = 10 ZMOKE)
 - **👤 Stellar Customer Accounts**: Custom user role with G-address attached to profile
 - **💼 Store Credit System**: Burn ZMOKE for store credit at checkout
-- **💱 Multi-Asset**: Supports both USDC and XLM payments
+- **💱 Multi-Asset**: Supports Blend USDC, Circle USDC, and XLM payments
+- **🔜 Gasless Transactions**: OpenZeppelin Stellar Channels integration (coming soon)
 
 ## 🚀 Quick Start
 
@@ -69,10 +71,11 @@ ngrok http 8080            # Tunnel for webhooks
 ### Flow
 1. Customer selects Stellar payment at WooCommerce checkout
 2. Redirected to React frontend with order details
-3. Connects wallet (Albedo) and deposits USDC/XLM to Pool Contract
+3. Connects wallet (Albedo) and deposits Blend USDC or XLM to Pool Contract
 4. **Pool Contract automatically supplies funds to Blend for yield**
 5. Backend confirms payment, updates WooCommerce order status
 6. Buyer receives ZMOKE rewards
+7. Admin can call `claim_emissions()` to collect accrued BLND rewards
 
 ---
 
@@ -243,39 +246,8 @@ Buyers automatically receive ZMOKE tokens as rewards:
 
 ## 📜 Smart Contract Operations
 
-### Deploy Contract
-```bash
-stellar contract build
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/payment_escrow.wasm \
-  --source deployer \
-  --network testnet \
-  --alias payment_escrow
-```
 
-### Initialize Contract
-```bash
-stellar contract invoke \
-  --id payment_escrow \
-  --source deployer \
-  --network testnet \
-  -- \
-  initialize \
-  --admin $(stellar keys address deployer) \
-  --fee_recipient $(stellar keys address oracle) \
-  --reflector CAVLP5DH2GJPZMVO7IJY4CVOD5MWEFTJFVPD2YY2FQXOQHRGHK4D6HLP
-```
 
-### Release Escrow
-```bash
-stellar contract invoke \
-  --id payment_escrow \
-  --source deployer \
-  --network testnet \
-  -- \
-  release \
-  --escrow_id 1
-```
 
 ---
 
@@ -294,8 +266,6 @@ If using an AI coding assistant with workflow support:
 
 | Command | Description |
 |---------|-------------|
-| `/deploy-testnet` | Build, deploy & initialize payment_escrow contract |
-| `/release-escrow` | Release escrowed funds to seller |
 | `/fund-buyer` | Swap XLM→USDC for buyer account |
 | `/setup-tokens` | Initialize SMOKY/ZMOKE tokens |
 | `/test-contracts` | Run contract test suite |
@@ -315,7 +285,6 @@ stellar-payment-dapp/
 │   └── src/services/    # Soroban/Stellar services
 ├── contracts/            # Soroban smart contracts
 │   ├── pool_contract/   # Main pool contract (Blend-integrated)
-│   ├── payment_escrow/  # Legacy escrow contract
 │   └── zmoke_minter/    # ZMOKE token minter
 ├── docs/                 # Documentation
 │   ├── woocommerce_setup.md

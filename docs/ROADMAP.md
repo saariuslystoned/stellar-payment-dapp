@@ -2,14 +2,14 @@
 
 This document outlines the development path for the Stellar Payment DApp.
 
-## Current Status: v2 (Blend-Integrated)
+## Current Status: v2.1 (Blend-Integrated + Emissions)
 
-The v2 release implements **Option B: Direct Contract Deposits with Blend Yield**.
+The v2.1 release implements **Option B: Direct Contract Deposits with Blend Yield**, now with Blend testnet USDC support and BLND emission claiming.
 
 ### ✅ Completed Features
 
 *   **Pool Contract** (`pool_contract`) deployed and verified on Testnet.
-    *   Contract ID: `CB2CUWS24XBZ2NYU2USBMAENZDFFRXB5PM4PPZYOFG2N2ASFJM7EM6K4`
+    *   Contract ID: `CCHVVL26PYRYRJR4OXEEAHNHMP6OAPEJT26EZRZXVDYL3HWHCD5SEDON`
     *   Direct deposits (USDC & XLM) from buyers
     *   **Automatic Blend Integration**: Deposits auto-supply to Blend Protocol for yield
     *   Uses `authorize_as_current_contract()` for proper cross-contract auth
@@ -17,9 +17,12 @@ The v2 release implements **Option B: Direct Contract Deposits with Blend Yield*
     *   Batch settlement capability (MSM-ready)
 *   **Blend Protocol Integration**:
     *   Upgraded to `soroban-sdk v25.0.1` and `blend-contract-sdk v2.25.0`
-    *   Custom Blend pool with USDC and XLM deposited successfully
+    *   Blend TESTNETv2 pool with Blend USDC and XLM supplied as collateral
     *   Used `blend-utils` mocking scripts to create mock coins for experimentation
     *   bToken positions earning yield automatically
+    *   **Blend USDC** (`CAQC...`) configured via `set_blend_usdc_token` — auto-supplied to Blend on deposit
+    *   **BLND Emissions**: `claim_emissions()` function added to pool contract for claiming accrued BLND rewards
+    *   Emissions research: wBTC supply (index 5) is the only supply-side emission on testnet; USDC/XLM supply earn lending yield but not BLND
 *   **WooCommerce Plugin (v2.0.0)**:
     *   ZMOKE rewards enrollment checkbox with $0.25 activation fee
     *   User account creation with custom `stellar_customer` role
@@ -41,7 +44,13 @@ The v2 release implements **Option B: Direct Contract Deposits with Blend Yield*
 
 ## Roadmap: Path to v3
 
-### Phase 1: Settlement & Withdrawals (Immediate Term)
+### Phase 1: Gasless Transactions & Settlement (Immediate Term)
+*   [ ] **OpenZeppelin Stellar Channels**: Integrate OZ hosted Channels plugin for gasless buyer transactions
+    *   Buyers won't need XLM for gas — OZ covers fees via managed channel accounts
+    *   Install `@openzeppelin/relayer-plugin-channels` SDK
+    *   Update `soroban.ts` to submit `func` + `auth` to OZ Channels API instead of direct RPC
+    *   Use hosted service (`channels.openzeppelin.com`) until fair-use limits are exceeded, then self-host
+    *   *Why*: Eliminates the biggest UX barrier — USDC-only users can't deposit without XLM for gas
 *   [ ] **Withdraw from Blend**: Implement `withdraw_from_blend()` to reclaim supplied funds + yield
 *   [ ] **Batch Settlement**: Trigger settlements via admin or automated job
 *   [ ] **Yield Distribution**: Calculate and distribute earned yield to platform/seller
@@ -83,6 +92,10 @@ The v2 release implements **Option B: Direct Contract Deposits with Blend Yield*
 | Feb 5 | ✅ G-address attached to user profile, visible in WP Admin |
 | Feb 5 | ✅ My Account page displays G-address and live ZMOKE balance (Horizon API) |
 | Feb 5 | ✅ Custom REST endpoint bypasses WC REST API meta limitations |
+| Feb 7 | ✅ Blend USDC (`CAQC...`) integrated — auto-supplies to Blend pool on deposit |
+| Feb 7 | ✅ Pool contract upgraded with `set_blend_usdc_token` and `claim_emissions` functions |
+| Feb 7 | ✅ BLND emissions research: emissions pipeline (emitter → backstop → pool → claim) mapped |
+| Feb 7 | ✅ Agent workflows updated: `/blend-position` shows supply positions + claimable BLND |
 
 ---
 

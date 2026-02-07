@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Vec, token,
+    contract, contractimpl, contracttype, Address, BytesN, Env, Map, Vec, token,
     contracterror, log, IntoVal
 };
 
@@ -43,7 +43,8 @@ pub enum DataKey {
     FeePercent,         // u32 - fee percentage (e.g., 200 = 2%)
     BlendPoolUsdc,      // Address - Blend pool for USDC
     BlendPoolXlm,       // Address - Blend pool for XLM (native wrapper)
-    UsdcToken,          // Address - USDC token address
+    UsdcToken,          // Address - Circle USDC token address (stays in contract)
+    BlendUsdcToken,     // Address - Blend USDC token address (supplied to Blend pool)
     TotalDepositsUsdc,  // i128 - total USDC deposited
     TotalDepositsXlm,   // i128 - total XLM deposited
     SuppliedToBlend,    // bool - whether funds are currently in Blend
@@ -126,10 +127,7 @@ impl PoolContract {
         client.transfer(&buyer, &env.current_contract_address(), &amount);
         
         // Update total deposits
-        let usdc_token: Address = env.storage().instance().get(&DataKey::UsdcToken)
-            .expect("Not initialized");
-            
-        if token == usdc_token {
+        if Self::is_usdc_token(&env, &token) {
             let mut total: i128 = env.storage().instance()
                 .get(&DataKey::TotalDepositsUsdc).unwrap_or(0);
             total += amount;
@@ -164,24 +162,31 @@ impl PoolContract {
     }
     
     /// Internal helper to supply funds to Blend (no auth required - called from deposit)
+    /// Note: Only Blend USDC is supplied to Blend pool. Circle USDC stays in contract.
     fn internal_supply_to_blend(env: &Env) {
-        let usdc_token: Address = match env.storage().instance().get(&DataKey::UsdcToken) {
+        let blend_usdc_token: Address = match env.storage().instance().get(&DataKey::BlendUsdcToken) {
             Some(addr) => addr,
-            None => return, // Not initialized
+            None => {
+                // Blend USDC not configured yet — skip USDC supply, still try XLM
+                Self::internal_supply_xlm_to_blend(env);
+                return;
+            }
         };
         
         let contract_addr = env.current_contract_address();
         
-        // =========== SUPPLY USDC ===========
+        // =========== SUPPLY BLEND USDC ===========
+        // Only Blend USDC goes to the Blend pool (testnet.blend.capital uses Blend USDC)
+        // Circle USDC stays in the contract wallet
         let blend_pool_usdc: Option<Address> = env.storage().instance()
             .get(&DataKey::BlendPoolUsdc);
         
         if let Some(pool_addr) = blend_pool_usdc {
-            let usdc_client = token::Client::new(env, &usdc_token);
+            let usdc_client = token::Client::new(env, &blend_usdc_token);
             let usdc_balance = usdc_client.balance(&contract_addr);
             
             if usdc_balance > 0 {
-                log!(env, "Supplying {} USDC to Blend pool {}", usdc_balance, pool_addr);
+                log!(env, "Supplying {} Blend USDC to Blend pool {}", usdc_balance, pool_addr);
                 
                 // Pre-authorize the transfer that Blend will make on our behalf
                 env.authorize_as_current_contract(soroban_sdk::vec![
@@ -189,7 +194,7 @@ impl PoolContract {
                     soroban_sdk::auth::InvokerContractAuthEntry::Contract(
                         soroban_sdk::auth::SubContractInvocation {
                             context: soroban_sdk::auth::ContractContext {
-                                contract: usdc_token.clone(),
+                                contract: blend_usdc_token.clone(),
                                 fn_name: soroban_sdk::Symbol::new(env, "transfer"),
                                 args: soroban_sdk::vec![
                                     env,
@@ -206,19 +211,19 @@ impl PoolContract {
                 let mut requests: Vec<pool::Request> = Vec::new(env);
                 requests.push_back(pool::Request {
                     request_type: 2, // SupplyCollateral
-                    address: usdc_token.clone(),
+                    address: blend_usdc_token.clone(),
                     amount: usdc_balance,
                 });
                 
                 let blend_client = pool::Client::new(env, &pool_addr);
                 
-                // Authorize Blend to transfer USDC from this contract
+                // Authorize Blend to transfer Blend USDC from this contract
                 env.authorize_as_current_contract(soroban_sdk::vec![
                     env,
                     soroban_sdk::auth::InvokerContractAuthEntry::Contract(
                         soroban_sdk::auth::SubContractInvocation {
                             context: soroban_sdk::auth::ContractContext {
-                                contract: usdc_token.clone(),
+                                contract: blend_usdc_token.clone(),
                                 fn_name: soroban_sdk::Symbol::new(env, "transfer"),
                                 args: soroban_sdk::vec![
                                     env,
@@ -239,11 +244,20 @@ impl PoolContract {
                     &requests,
                 );
                 
-                log!(env, "Successfully supplied USDC to Blend pool!");
+                log!(env, "Successfully supplied Blend USDC to Blend pool!");
             }
         }
         
         // =========== SUPPLY XLM (Wrapped) ===========
+        Self::internal_supply_xlm_to_blend(env);
+        
+        env.storage().instance().set(&DataKey::SuppliedToBlend, &true);
+    }
+
+    /// Internal helper to supply XLM to Blend pool
+    fn internal_supply_xlm_to_blend(env: &Env) {
+        let contract_addr = env.current_contract_address();
+        
         let blend_pool_xlm: Option<Address> = env.storage().instance()
             .get(&DataKey::BlendPoolXlm);
         
@@ -262,8 +276,6 @@ impl PoolContract {
                 log!(env, "Supplying {} XLM to Blend pool {}", xlm_balance, pool_addr);
                 
                 // Pre-authorize the transfer that Blend will make on our behalf
-                // When Blend calls xlm_sac.transfer(our_contract, blend_pool, amount),
-                // this authorization proves we consent to that transfer
                 env.authorize_as_current_contract(soroban_sdk::vec![
                     env,
                     soroban_sdk::auth::InvokerContractAuthEntry::Contract(
@@ -301,17 +313,13 @@ impl PoolContract {
                 log!(env, "Successfully supplied XLM to Blend pool!");
             }
         }
-        
-        env.storage().instance().set(&DataKey::SuppliedToBlend, &true);
     }
 
     /// Supply funds to Blend pool to earn yield
     /// Called periodically (e.g., after deposits accumulate)
+    /// Note: Only Blend USDC and XLM are supplied. Circle USDC stays in contract.
     pub fn supply_to_blend(env: Env) {
         Self::require_admin(&env);
-        
-        let usdc_token: Address = env.storage().instance().get(&DataKey::UsdcToken)
-            .expect("Not initialized");
         
         let total_usdc: i128 = env.storage().instance()
             .get(&DataKey::TotalDepositsUsdc).unwrap_or(0);
@@ -324,28 +332,23 @@ impl PoolContract {
             return;
         }
         
-        // Get Blend pool addresses
+        // Supply Blend USDC (not Circle USDC) to Blend pool
         let blend_pool_usdc: Option<Address> = env.storage().instance()
             .get(&DataKey::BlendPoolUsdc);
         
         if let Some(pool) = blend_pool_usdc {
             if total_usdc > 0 {
-                // Build supply request
-                // Note: In production, use blend_pool::Client::new()
-                // For now, we emit an event for the backend to handle
-                log!(&env, "Supplying {} USDC to Blend pool {}", total_usdc, pool);
-                
-                // Mark as supplied
+                log!(&env, "Supplying Blend USDC to Blend pool {}", pool);
                 env.storage().instance().set(&DataKey::SuppliedToBlend, &true);
             }
         }
         
-        // Similar for XLM...
         log!(&env, "Supply to Blend complete: USDC={}, XLM={}", total_usdc, total_xlm);
     }
 
     /// Withdraw from Blend and settle to seller
     /// Called at end-of-day by admin/backend
+    /// Transfers both Circle USDC and Blend USDC balances to seller (minus fees)
     pub fn settle(env: Env) -> (i128, i128) {
         Self::require_admin(&env);
         
@@ -353,8 +356,7 @@ impl PoolContract {
             .expect("Not initialized");
         let fee_percent: u32 = env.storage().instance().get(&DataKey::FeePercent)
             .unwrap_or(200); // Default 2%
-        let usdc_token: Address = env.storage().instance().get(&DataKey::UsdcToken)
-            .expect("Not initialized");
+        let contract_addr = env.current_contract_address();
         
         let total_usdc: i128 = env.storage().instance()
             .get(&DataKey::TotalDepositsUsdc).unwrap_or(0);
@@ -374,20 +376,35 @@ impl PoolContract {
             .get(&DataKey::SuppliedToBlend).unwrap_or(false);
         
         if supplied {
-            // Note: In production, call Blend withdraw here with `seller_usdc` and `seller_xlm`
-            // NOT the full amount. This leaves `fee_usdc` and `fee_xlm` in the pool.
             log!(&env, "Withdrawing seller share from Blend: USDC={}, XLM={}", seller_usdc, seller_xlm);
-            
-            // We do NOT set SuppliedToBlend to false, because fees remain!
-            // Only set to false if we withdrew everything (which we didn't)
         }
         
-        // Transfer to seller
-        if seller_usdc > 0 {
-            let client = token::Client::new(&env, &usdc_token);
-            // Ensure we have funds (withdrawn from Blend or just in balance)
-            client.transfer(&env.current_contract_address(), &seller, &seller_usdc);
-            log!(&env, "Settled {} USDC to seller", seller_usdc);
+        // Transfer Circle USDC to seller (held in contract wallet)
+        if let Some(circle_usdc) = env.storage().instance().get::<_, Address>(&DataKey::UsdcToken) {
+            let client = token::Client::new(&env, &circle_usdc);
+            let balance = client.balance(&contract_addr);
+            if balance > 0 {
+                let fee = (balance * fee_percent as i128) / 10000;
+                let seller_share = balance - fee;
+                if seller_share > 0 {
+                    client.transfer(&contract_addr, &seller, &seller_share);
+                    log!(&env, "Settled {} Circle USDC to seller", seller_share);
+                }
+            }
+        }
+        
+        // Transfer Blend USDC to seller (withdrawn from Blend or in balance)
+        if let Some(blend_usdc) = env.storage().instance().get::<_, Address>(&DataKey::BlendUsdcToken) {
+            let client = token::Client::new(&env, &blend_usdc);
+            let balance = client.balance(&contract_addr);
+            if balance > 0 {
+                let fee = (balance * fee_percent as i128) / 10000;
+                let seller_share = balance - fee;
+                if seller_share > 0 {
+                    client.transfer(&contract_addr, &seller, &seller_share);
+                    log!(&env, "Settled {} Blend USDC to seller", seller_share);
+                }
+            }
         }
         
         // For XLM, we'd need to use the native asset wrapper or Stellar operations
@@ -434,20 +451,35 @@ impl PoolContract {
     }
 
     /// Withdraw accumulated fees (admin only)
+    /// Transfers fee balances of both Circle USDC and Blend USDC
     pub fn withdraw_fees(env: Env, recipient: Address) -> (i128, i128) {
         Self::require_admin(&env);
         
-        let usdc_token: Address = env.storage().instance().get(&DataKey::UsdcToken)
-            .expect("Not initialized");
+        let contract_addr = env.current_contract_address();
         
         let fees_usdc: i128 = env.storage().instance()
             .get(&DataKey::FeesEarnedUsdc).unwrap_or(0);
         let fees_xlm: i128 = env.storage().instance()
             .get(&DataKey::FeesEarnedXlm).unwrap_or(0);
         
-        if fees_usdc > 0 {
-            let client = token::Client::new(&env, &usdc_token);
-            client.transfer(&env.current_contract_address(), &recipient, &fees_usdc);
+        // Transfer Circle USDC fees
+        if let Some(circle_usdc) = env.storage().instance().get::<_, Address>(&DataKey::UsdcToken) {
+            let client = token::Client::new(&env, &circle_usdc);
+            let balance = client.balance(&contract_addr);
+            if balance > 0 {
+                client.transfer(&contract_addr, &recipient, &balance);
+                log!(&env, "Withdrew {} Circle USDC fees", balance);
+            }
+        }
+        
+        // Transfer Blend USDC fees
+        if let Some(blend_usdc) = env.storage().instance().get::<_, Address>(&DataKey::BlendUsdcToken) {
+            let client = token::Client::new(&env, &blend_usdc);
+            let balance = client.balance(&contract_addr);
+            if balance > 0 {
+                client.transfer(&contract_addr, &recipient, &balance);
+                log!(&env, "Withdrew {} Blend USDC fees", balance);
+            }
         }
         
         // Reset fee counters
@@ -473,6 +505,52 @@ impl PoolContract {
         log!(&env, "Fee percent updated to {}bp", new_fee_percent);
     }
 
+    /// Update Blend USDC token address (admin only)
+    /// This is the USDC variant that gets supplied to the Blend pool
+    pub fn set_blend_usdc_token(env: Env, new_blend_usdc_token: Address) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::BlendUsdcToken, &new_blend_usdc_token);
+        log!(&env, "Blend USDC token updated to {}", new_blend_usdc_token);
+    }
+
+    /// Claim BLND emissions from the Blend pool (admin only)
+    /// 
+    /// Calls the Blend pool's `claim` function to collect accrued BLND
+    /// emissions for this contract's supply/collateral positions.
+    /// 
+    /// # Arguments
+    /// * `reserve_token_ids` - Vec of emission indices to claim
+    ///   (e.g., 6 = USDC supply emissions. Formula: reserve_index * 2 for supply)
+    pub fn claim_emissions(env: Env, reserve_token_ids: Vec<u32>) -> i128 {
+        Self::require_admin(&env);
+        
+        let contract_addr = env.current_contract_address();
+        
+        // Use the USDC Blend pool (same pool used for supply)
+        let blend_pool: Address = env.storage().instance()
+            .get(&DataKey::BlendPoolUsdc)
+            .expect("Blend pool not configured");
+        
+        let blend_client = pool::Client::new(&env, &blend_pool);
+        
+        // Claim emissions: from=this contract, to=this contract
+        let claimed = blend_client.claim(
+            &contract_addr,
+            &reserve_token_ids,
+            &contract_addr,
+        );
+        
+        log!(&env, "Claimed {} BLND emissions from Blend pool", claimed);
+        
+        claimed
+    }
+
+    /// Upgrade contract WASM (admin only)
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::require_admin(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     // ============================================================
     // INTERNAL HELPERS
     // ============================================================
@@ -481,6 +559,17 @@ impl PoolContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin)
             .expect("Not initialized");
         admin.require_auth();
+    }
+
+    /// Check if a token address matches either Circle USDC or Blend USDC
+    fn is_usdc_token(env: &Env, token: &Address) -> bool {
+        if let Some(circle) = env.storage().instance().get::<_, Address>(&DataKey::UsdcToken) {
+            if *token == circle { return true; }
+        }
+        if let Some(blend) = env.storage().instance().get::<_, Address>(&DataKey::BlendUsdcToken) {
+            if *token == blend { return true; }
+        }
+        false
     }
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Horizon } from '@stellar/stellar-sdk';
-import { soroban, TOKEN_ID, NATIVE_TOKEN_ID } from '../services/soroban';
+import { soroban, TOKEN_ID, BLEND_TOKEN_ID, NATIVE_TOKEN_ID } from '../services/soroban';
 import { SecretKeyModal } from './SecretKeyModal';
 
 const { Server } = Horizon;
@@ -99,12 +99,14 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
         }
     };
 
-    const isUsdc = selectedToken === TOKEN_ID;
-    const tokenSymbol = isUsdc ? 'USDC' : 'XLM';
-    // Use live price for XLM, 1.0 for USDC - NO FALLBACK for XLM!
-    const pricePerUnit = isUsdc ? 1.0 : xlmPrice?.xlmPerUsd;
+    const isBlend = selectedToken === BLEND_TOKEN_ID;
+    const isCircle = selectedToken === TOKEN_ID;
+    const isStablecoin = isBlend || isCircle;
+    const tokenSymbol = isBlend ? 'Blend USDC' : isCircle ? 'USDC' : 'XLM';
+    // Use live price for XLM, 1.0 for any stablecoin - NO FALLBACK for XLM!
+    const pricePerUnit = isStablecoin ? 1.0 : xlmPrice?.xlmPerUsd;
     // Block XLM deposits if price unavailable
-    const xlmPriceUnavailable: boolean = !isUsdc && (!xlmPrice || !!priceError);
+    const xlmPriceUnavailable: boolean = !isStablecoin && (!xlmPrice || !!priceError);
 
     const handleDeposit = async () => {
         // Block if XLM price not available
@@ -359,15 +361,22 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
                 {/* Token Selector */}
                 <div className="flex gap-2 p-1 bg-slate-900 rounded-lg">
                     <button
+                        onClick={() => setSelectedToken(BLEND_TOKEN_ID)}
+                        className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${isBlend ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-white'
+                            }`}
+                    >
+                        💵 Blend USDC
+                    </button>
+                    <button
                         onClick={() => setSelectedToken(TOKEN_ID)}
-                        className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${isUsdc ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-white'
+                        className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${isCircle ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-white'
                             }`}
                     >
                         🇺🇸 USDC
                     </button>
                     <button
                         onClick={() => setSelectedToken(NATIVE_TOKEN_ID)}
-                        className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${!isUsdc ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-white'
+                        className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${!isStablecoin ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-white'
                             }`}
                     >
                         🚀 XLM
@@ -391,7 +400,7 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
                     <div className="flex justify-between text-sm">
                         <span className="text-slate-400 flex items-center gap-2">
                             Exchange Rate
-                            {!isUsdc && (
+                            {!isStablecoin && (
                                 priceLoading ? (
                                     <span className="text-xs text-yellow-500 animate-pulse">⏳</span>
                                 ) : priceError ? (
@@ -407,7 +416,7 @@ export const DepositForm = ({ buyerAddress, orderId, initialAmount }: DepositFor
                             ) : (
                                 <>
                                     1 USD = {(pricePerUnit ?? 0).toFixed(2)} {tokenSymbol}
-                                    {!isUsdc && xlmPrice && (
+                                    {!isStablecoin && xlmPrice && (
                                         <span className="text-slate-500 text-xs ml-1">(${xlmPrice.priceUsd.toFixed(4)})</span>
                                     )}
                                 </>
