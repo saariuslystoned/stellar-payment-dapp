@@ -1,38 +1,48 @@
 // Build: 1770147200
-import { useState, useMemo } from 'react';
-import { WalletConnect } from './components/WalletConnect';
-import { DepositForm } from './components/DepositForm';
-import { TokenDashboard } from './components/TokenDashboard';
-import { StakingPanel } from './components/StakingPanel';
-import { BlendService } from './services/BlendService';
+import { useState, useMemo } from "react";
+import { WalletConnect } from "./components/WalletConnect";
+import { DepositForm } from "./components/DepositForm";
+import { TokenDashboard } from "./components/TokenDashboard";
+import { StakingPanel } from "./components/StakingPanel";
+import { BlendService } from "./services/BlendService";
 
 function App() {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [networkPassphrase] = useState("Test SDF Network ; September 2015");
 
-  const blendService = useMemo(() => new BlendService(networkPassphrase), [networkPassphrase]);
+  const blendService = useMemo(
+    () => new BlendService(networkPassphrase),
+    [networkPassphrase],
+  );
 
   // Check for URL params for checkout mode
   const queryParams = new URLSearchParams(window.location.search);
-  const orderId = queryParams.get('order_id');
-  const initialAmount = queryParams.get('amount');
+  const orderId = queryParams.get("order_id");
+  const initialAmount = queryParams.get("amount");
   const isCheckoutMode = !!orderId;
 
   // Mock signer for now (In real app, pass kit.signTransaction)
-  const signTx = async (tx: string) => {
+  const signTx = (tx: string): Promise<string> => {
     console.log("Signing", tx);
-    return tx;
+    return Promise.resolve(tx);
   };
 
   // Checkout Mode UI - Minimal, no-scroll version
   if (isCheckoutMode) {
     return (
-      <div className="bg-slate-950 text-white flex flex-col justify-center items-center h-screen w-screen overflow-hidden" style={{ margin: 0, padding: 0 }}>
+      <div
+        className="bg-slate-950 text-white flex flex-col justify-center items-center h-screen w-screen overflow-hidden"
+        style={{ margin: 0, padding: 0 }}
+      >
         {publicKey ? (
           <div className="w-full max-w-sm bg-slate-900/90 p-6 rounded-xl border border-slate-700 shadow-xl">
             <div className="mb-4 text-center">
-              <span className="text-slate-500 text-xs uppercase tracking-widest">Order #{orderId}</span>
-              <h2 className="text-xl font-bold mt-1 text-emerald-400">Pay with Stellar</h2>
+              <span className="text-slate-500 text-xs uppercase tracking-widest">
+                Order #{orderId}
+              </span>
+              <h2 className="text-xl font-bold mt-1 text-emerald-400">
+                Pay with Stellar
+              </h2>
             </div>
             <DepositForm
               buyerAddress={publicKey}
@@ -46,10 +56,16 @@ function App() {
         ) : (
           <div className="w-full max-w-sm p-4">
             <div className="text-center mb-6">
-              <h2 className="text-xl font-bold text-white mb-1">Complete Your Order</h2>
+              <h2 className="text-xl font-bold text-white mb-1">
+                Complete Your Order
+              </h2>
               <p className="text-slate-400 text-sm">Order #{orderId}</p>
             </div>
-            <WalletConnect publicKey={publicKey} onConnect={setPublicKey} onDisconnect={() => setPublicKey(null)} />
+            <WalletConnect
+              publicKey={publicKey}
+              onConnect={setPublicKey}
+              onDisconnect={() => setPublicKey(null)}
+            />
           </div>
         )}
       </div>
@@ -68,7 +84,11 @@ function App() {
             SMOKY
           </h1>
         </div>
-        <WalletConnect publicKey={publicKey} onConnect={setPublicKey} onDisconnect={() => setPublicKey(null)} />
+        <WalletConnect
+          publicKey={publicKey}
+          onConnect={setPublicKey}
+          onDisconnect={() => setPublicKey(null)}
+        />
       </header>
 
       {/* Main Content */}
@@ -76,7 +96,10 @@ function App() {
         <div className="max-w-3xl mx-auto">
           {publicKey ? (
             <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <TokenDashboard publicKey={publicKey} networkPassphrase={networkPassphrase} />
+              <TokenDashboard
+                publicKey={publicKey}
+                networkPassphrase={networkPassphrase}
+              />
 
               <div className="bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-xl">
                 <h2 className="text-xl font-semibold mb-6 flex items-center gap-2">
@@ -97,9 +120,12 @@ function App() {
               <div className="w-20 h-20 bg-slate-900 rounded-full flex items-center justify-center mx-auto mb-6 border border-slate-800">
                 <span className="text-4xl">🔐</span>
               </div>
-              <h2 className="text-3xl font-bold mb-4">Welcome to Smoky Coins</h2>
+              <h2 className="text-3xl font-bold mb-4">
+                Welcome to Smoky Coins
+              </h2>
               <p className="text-slate-400 max-w-md mx-auto mb-8">
-                Connect your freighter wallet to access your SMOKY tokens, earn ZMOKE rewards, and manage secure escrow payments.
+                Connect your freighter wallet to access your SMOKY tokens, earn
+                ZMOKE rewards, and manage secure escrow payments.
               </p>
             </div>
           )}
